@@ -57,10 +57,38 @@ pub enum Literal {
     Number(f64),
 }
 
+impl Display for Literal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!("{:?}", self))
+    }
+}
+
+impl Literal {
+    #[inline]
+    pub fn opt_string(s: String) -> Option<Self> {
+        Some(Literal::String(s))
+    }
+
+    #[inline]
+    pub fn opt_identifier(s: String) -> Option<Self> {
+        Some(Literal::Identifier(s))
+    }
+
+    #[inline]
+    pub fn opt_number(s: f64) -> Option<Self> {
+        Some(Literal::Number(s))
+    }
+
+    #[inline]
+    pub fn opt_none() -> Option<Self> {
+        None
+    }
+}
+
 #[derive(Debug, PartialEq)]
 pub struct Token {
     token_type: TokenType,
-    lexeme: String,
+    pub lexeme: String,
     line: usize,
     literal: Option<Literal>,
 }

@@ -6,6 +6,7 @@ mod errors {
 }
 pub use errors::*;
 
+mod ast;
 pub mod lox;
 mod scan;
 mod tokens;
