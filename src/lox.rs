@@ -4,9 +4,9 @@ use std::{
     process::exit,
 };
 
-use log::debug;
+use log::{debug, error};
 
-use crate::{errors::*, scan::Scanner};
+use crate::{ast::Parser, errors::*, scan::Scanner};
 pub struct Lox {
     had_error: bool,
 }
@@ -37,7 +37,17 @@ impl Lox {
         match scanner.scan_tokens() {
             Ok(tokens) => {
                 debug!("Tokens found: {:?}", tokens);
-                Ok(())
+                let mut parser = Parser::new(tokens);
+                match parser.parse() {
+                    Some(expr) => {
+                        debug!("Created AST Expr: {}", expr);
+                        Ok(())
+                    }
+                    None => {
+                        error!("Parsing did not produce any tokens");
+                        Ok(())
+                    }
+                }
             }
             Err(e) => Err(e),
         }

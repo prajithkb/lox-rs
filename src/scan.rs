@@ -140,7 +140,7 @@ impl Scanner {
         self.advance();
         // get the value from "[...]", excluding the '"'
         let string = self.source[self.start + 1..self.current - 1].to_string();
-        self.add_token(TokenType::String, Some(Literal::String(string)));
+        self.add_token(TokenType::String, Literal::opt_string(string));
         Ok(())
     }
 
@@ -156,7 +156,7 @@ impl Scanner {
         }
         let number_string = &self.source[self.start..self.current];
         if let Ok(number) = number_string.parse::<f64>() {
-            self.add_token(TokenType::Number, Some(Literal::Number(number)))
+            self.add_token(TokenType::Number, Literal::opt_number(number))
         } else {
             report_error(self.line, format!("{} Not a valid number", number_string));
             return Err("Invalid number".into());
@@ -175,7 +175,7 @@ impl Scanner {
             self.add_token(t, None);
         } else {
             let id = text.to_string();
-            self.add_token(TokenType::Identifier, Some(Literal::Identifier(id)));
+            self.add_token(TokenType::Identifier, Literal::opt_identifier(id));
         }
     }
 

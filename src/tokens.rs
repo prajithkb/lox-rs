@@ -50,11 +50,12 @@ pub enum TokenType {
 
     Eof,
 }
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Literal {
     String(String),
     Identifier(String),
     Number(f64),
+    Bool(bool),
 }
 
 impl Display for Literal {
@@ -80,17 +81,21 @@ impl Literal {
     }
 
     #[inline]
+    pub fn opt_bool(s: bool) -> Option<Self> {
+        Some(Literal::Bool(s))
+    }
+    #[inline]
     pub fn opt_none() -> Option<Self> {
         None
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub struct Token {
-    token_type: TokenType,
+    pub token_type: TokenType,
     pub lexeme: String,
-    line: usize,
-    literal: Option<Literal>,
+    pub line: usize,
+    pub literal: Option<Literal>,
 }
 
 impl Token {
