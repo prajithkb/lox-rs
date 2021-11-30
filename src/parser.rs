@@ -78,10 +78,14 @@ impl<'a> Parser<'a> {
         Parser { tokens, current: 0 }
     }
 
-    pub fn parse(&mut self) -> Option<Expr> {
-        self.expression()
-            .map_err(|e| error!("Parse error {}", e))
-            .ok()
+    pub fn parse(&mut self) -> Result<Expr> {
+        match self.expression() {
+            Ok(r) => Ok(r),
+            Err(e) => {
+                error!("Parse error {}", e);
+                bail!(ErrorKind::ParseError("Parse failed".into()));
+            }
+        }
     }
 
     fn expression(&mut self) -> Result<Expr> {
@@ -237,7 +241,7 @@ impl<'a> Parser<'a> {
 mod tests {
     use crate::{
         errors::*,
-        scan::Scanner,
+        scanner::Scanner,
         tokens::{Literal, Token, TokenType},
     };
 
@@ -281,11 +285,21 @@ mod tests {
             "(- (+ (Number(2.0)) (Number(3.0))) (/ (Number(4.0)) (Grouping (* (Number(2.0)) (Number(3.0))))))",
             expr.to_string()
         );
+
         let mut scanner = Scanner::new("3 - 4 / 3 + 4 * 6 -(3 -4)".into());
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
         let expr = parser.parse().unwrap();
-        assert_eq!("(- (+ (- (Number(3.0)) (/ (Number(4.0)) (Number(3.0)))) (* (Number(4.0)) (Number(6.0)))) (Grouping (- (Number(3.0)) (Number(4.0)))))", 
+        assert_eq!("(- (+ (- (Number(3.0)) (/ (Number(4.0)) (Number(3.0)))) (* (Number(4.0)) (Number(6.0)))) (Grouping (- (Number(3.0)) (Number(4.0)))))",
+            expr.to_string()
+        );
+
+        let mut scanner = Scanner::new("5 / 5 == 1".into());
+        let tokens = scanner.scan_tokens()?;
+        let mut parser = Parser::new(tokens);
+        let expr = parser.parse().unwrap();
+        assert_eq!(
+            "(== (/ (Number(5.0)) (Number(5.0))) (Number(1.0)))",
             expr.to_string()
         );
         Ok(())

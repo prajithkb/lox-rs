@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 
-use log::debug;
+use log::{debug, error};
 
 use crate::{
     errors::*,
@@ -56,13 +56,16 @@ impl Scanner {
             self.start = self.current;
             match self.scan_token() {
                 Ok(_) => continue,
-                Err(_) => error_found = true,
+                Err(e) => {
+                    error!("Found error during scan: {}", e);
+                    error_found = true;
+                }
             }
         }
         self.tokens
             .push(Token::new(TokenType::Eof, "".into(), self.line, None));
         if error_found {
-            Err("Scan error".into())
+            bail!(ErrorKind::ScanError("Scan failed".into()))
         } else {
             Ok(self.tokens.as_slice())
         }
@@ -117,7 +120,10 @@ impl Scanner {
                     self.add_identifier();
                 } else {
                     report_error(self.line, format!("Unexpected character {}", current_char));
-                    return Err("Unexpected character".into());
+                    bail!(ErrorKind::ScanError(format!(
+                        "Unexpected character {}",
+                        current_char
+                    )));
                 }
             }
         }
@@ -134,7 +140,7 @@ impl Scanner {
         if self.is_at_end() {
             let l = &self.source[self.start..self.current];
             report_error(self.line, format!("Unterminated String literal {}", l));
-            return Err("unterminated String literal".into());
+            bail!(format!("Unterminated String literal {}", l))
         }
         // advance to conver the closing '"'
         self.advance();
@@ -159,7 +165,7 @@ impl Scanner {
             self.add_token(TokenType::Number, Literal::opt_number(number))
         } else {
             report_error(self.line, format!("{} Not a valid number", number_string));
-            return Err("Invalid number".into());
+            bail!(format!("{} is not a number", number_string))
         }
         Ok(())
     }
@@ -193,7 +199,8 @@ impl Scanner {
 
     fn match_char_and_add_token(&mut self, c: char, if_matches: TokenType, if_not: TokenType) {
         if self.next_char_is(c) {
-            self.add_token(if_matches, None)
+            self.advance();
+            self.add_token(if_matches, None);
         } else {
             self.add_token(if_not, None)
         }
@@ -302,6 +309,21 @@ mod tests {
             Token::new(TokenType::Eof, "".into(), 5, None),
         ];
         assert_eq!(expected, tokens);
+
+        source = "5/5 ==1";
+        scanner = Scanner::new(source.into());
+        tokens = scanner.scan_tokens()?;
+        assert_eq!(
+            &[
+                Token::new(TokenType::Number, "5".into(), 1, Literal::opt_number(5.0)),
+                Token::new(TokenType::Slash, "/".into(), 1, None),
+                Token::new(TokenType::Number, "5".into(), 1, Literal::opt_number(5.0)),
+                Token::new(TokenType::EqualEqual, "==".into(), 1, None),
+                Token::new(TokenType::Number, "1".into(), 1, Literal::opt_number(1.0)),
+                Token::new(TokenType::Eof, "".into(), 1, None)
+            ],
+            tokens
+        );
         Ok(())
     }
 }

@@ -6,17 +6,21 @@ use std::{
 
 use log::{debug, error};
 
-use crate::{ast::Parser, errors::*, scan::Scanner};
+use crate::{errors::*, interpreter::Interpreter, parser::Parser, scanner::Scanner};
 pub struct Lox {
     had_error: bool,
+    had_runtime_error: bool,
 }
 
 impl Lox {
     pub fn new() -> Self {
-        Lox { had_error: false }
+        Lox {
+            had_error: false,
+            had_runtime_error: false,
+        }
     }
 
-    pub fn run_script(&self, script: &str) -> Result<()> {
+    pub fn run_script(&mut self, script: &str) -> Result<()> {
         let mut script = File::open(script).chain_err(|| "Unable to create file")?;
         let mut script_contents = String::new();
         if script
@@ -28,28 +32,49 @@ impl Lox {
             if self.had_error {
                 exit(65)
             }
+            if self.had_runtime_error {
+                exit(75)
+            }
         }
         Ok(())
     }
 
-    pub fn run(&self, content: String) -> Result<()> {
+    pub fn run(&mut self, content: String) -> Result<()> {
         let mut scanner = Scanner::new(content);
+        let mut interpreter = Interpreter::new();
         match scanner.scan_tokens() {
             Ok(tokens) => {
-                debug!("Tokens found: {:?}", tokens);
+                debug!("Created Tokens : {:?}", tokens);
                 let mut parser = Parser::new(tokens);
                 match parser.parse() {
-                    Some(expr) => {
-                        debug!("Created AST Expr: {}", expr);
-                        Ok(())
+                    Ok(expr) => {
+                        debug!("Created (AST) Expr: {}", expr);
+                        match interpreter.interpret(&expr) {
+                            Ok(result) => {
+                                self.had_runtime_error = true;
+                                debug!("Interpreted result: {:?}", result);
+                                println!("Interpreted result: {:?}", result);
+                                Ok(())
+                            }
+                            Err(e) => {
+                                self.had_error = true;
+                                error!("{}", e);
+                                Ok(())
+                            }
+                        }
                     }
-                    None => {
-                        error!("Parsing did not produce any tokens");
+                    Err(e) => {
+                        self.had_error = true;
+                        error!("{}", e);
                         Ok(())
                     }
                 }
             }
-            Err(e) => Err(e),
+            Err(e) => {
+                self.had_error = true;
+                error!("{}", e);
+                Err(e)
+            }
         }
     }
 
@@ -82,5 +107,5 @@ pub fn report_error(line: usize, message: String) {
 }
 
 pub fn report(line: usize, location: String, message: String) {
-    eprintln!("[line: {}] Error {}: message {}", line, location, message);
+    eprintln!("[line: {}] Error {}: message: {}", line, location, message);
 }
