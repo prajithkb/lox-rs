@@ -1,6 +1,6 @@
 use log::error;
 
-use crate::{errors::*, lox::report, tokens::TokenType};
+use crate::{errors::*, interpreter::Value, lox::report, tokens::TokenType};
 use std::fmt::Display;
 
 use crate::tokens::{Literal, Token};
@@ -18,6 +18,13 @@ impl Display for Expr {
         f.write_str(&to_string(self))
     }
 }
+
+#[derive(Debug, PartialEq)]
+pub enum Stmt {
+    Expression(Box<Expr>),
+    Print(Value),
+}
+
 fn literal_to_str(literal: &Option<Literal>) -> String {
     match literal {
         Some(v) => v.to_string(),
@@ -56,6 +63,10 @@ fn report_error_for_token(token: &Token, message: String) {
 
 ///  Grammer from https://craftinginterpreters.com/parsing-expressions.html
 /// ```txt
+/// program        → statement* EOF ;
+/// statement      → exprStmt | printStmt ;
+/// exprStmt       → expression ";" ;
+/// printStmt      → "print" expression ";" ;
 /// expression     → equality ;
 /// equality       → comparison ( ( "!=" | "==" ) comparison )* ;
 /// comparison     → term ( ( ">" | ">=" | "<" | "<=" ) term )* ;
@@ -300,6 +311,16 @@ mod tests {
         let expr = parser.parse().unwrap();
         assert_eq!(
             "(== (/ (Number(5.0)) (Number(5.0))) (Number(1.0)))",
+            expr.to_string()
+        );
+
+        let mut scanner = Scanner::new("\"hello\" + \"world\"".into());
+        let tokens = scanner.scan_tokens()?;
+        println!("{:?}", tokens);
+        let mut parser = Parser::new(tokens);
+        let expr = parser.parse().unwrap();
+        assert_eq!(
+            "(+ (String(\"hello\")) (String(\"world\")))",
             expr.to_string()
         );
         Ok(())

@@ -292,6 +292,18 @@ mod tests {
         } else {
             return Err("Not a Boolean".into());
         }
+
+        let mut scanner = Scanner::new("\"hello\" +\" \" + \"world\" + \"!\"".into());
+        let tokens = scanner.scan_tokens()?;
+        let mut parser = Parser::new(tokens);
+        let expr = parser.parse()?;
+        let mut interpreter = Interpreter::new();
+        let expected = "hello world!".to_string();
+        if let Value::String(s) = interpreter.interpret(&expr)? {
+            assert_eq!(expected, s);
+        } else {
+            return Err("Not a Boolean".into());
+        }
         Ok(())
     }
 }
