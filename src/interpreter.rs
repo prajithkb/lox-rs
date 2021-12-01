@@ -1,9 +1,13 @@
-use crate::parser::Expr;
+use std::collections::HashMap;
+use std::fmt::{write, Display};
+use std::io::{stdout, BufWriter, Write};
+
+use crate::parser::{Expr, Stmt};
 
 use crate::errors::*;
 use crate::tokens::{Literal, Token, TokenType};
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Value {
     _Any(Box<Value>),
     Nil,
@@ -11,15 +15,111 @@ pub enum Value {
     Number(f64),
     String(String),
 }
-pub struct Interpreter {}
 
-impl Interpreter {
+impl Display for Value {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Value::_Any(_) => todo!(),
+            Value::Nil => f.write_str("nil"),
+            Value::Boolean(b) => f.write_str(&b.to_string()),
+            Value::Number(n) => f.write_str(&n.to_string()),
+            Value::String(s) => f.write_str(s),
+        }
+    }
+}
+
+struct Environment {
+    values: HashMap<String, Value>,
+}
+
+impl Environment {
     pub fn new() -> Self {
-        Interpreter {}
+        Environment {
+            values: HashMap::new(),
+        }
     }
 
-    pub fn interpret(&mut self, expr: &Expr) -> Result<Value> {
-        self.evaluate(expr)
+    pub fn define(&mut self, name: String, value: Value) -> Option<Value> {
+        self.values.insert(name, value)
+    }
+
+    pub fn get(&self, name: &str) -> Option<Value> {
+        self.values.get(name).cloned()
+    }
+}
+
+pub struct Interpreter<'a> {
+    environment: Environment,
+    output_writer: Option<&'a mut dyn Write>,
+}
+
+impl<'a> Interpreter<'a> {
+    pub fn new() -> Self {
+        Interpreter {
+            environment: Environment::new(),
+            output_writer: None,
+        }
+    }
+
+    pub fn new_with_writer(output_writer: &'a mut dyn Write) -> Self {
+        Interpreter {
+            environment: Environment::new(),
+            output_writer: Some(output_writer),
+        }
+    }
+
+    pub fn interpret(&mut self, statements: &[Stmt]) -> Result<()> {
+        for statement in statements {
+            self.execute(statement)?;
+        }
+        Ok(())
+    }
+
+    fn execute(&mut self, statement: &Stmt) -> Result<()> {
+        match statement {
+            Stmt::Expression(e) => self.evaluate(e).map(|_| Ok(()))?,
+            Stmt::Print(e) => self.print_statement(e),
+            Stmt::Var(token, expr) => self.var_statement(token, expr),
+        }
+    }
+
+    fn print_statement(&mut self, expr: &Expr) -> Result<()> {
+        let v = self.evaluate(expr)?;
+        if let Some(writer) = self.output_writer.as_deref_mut() {
+            writeln!(writer, "{}", v)?;
+        }
+        println!("{}", v);
+        Ok(())
+    }
+
+    fn var_statement(&mut self, token: &Token, expr: &Option<Box<Expr>>) -> Result<()> {
+        let name = token.lexeme.clone();
+        let value = match expr {
+            Some(e) => self.evaluate(e)?,
+            None => Value::Nil,
+        };
+        self.environment.define(name, value);
+        Ok(())
+    }
+
+    fn evaluate(&mut self, expr: &Expr) -> Result<Value> {
+        match expr {
+            Expr::Binary(left, operator, right) => self.evaluate_binary(left, operator, right),
+            Expr::Grouping(expr) => self.evaluate_grouping(expr),
+            Expr::Literal(literal) => self.evaluate_literal(literal.clone()),
+            Expr::Unary(operator, right) => self.evaluate_unary(operator, right),
+            Expr::Var(name) => self.evaluate_var(name),
+        }
+    }
+
+    fn evaluate_var(&mut self, name: &Token) -> Result<Value> {
+        match self.environment.get(&name.lexeme) {
+            Some(v) => Ok(v),
+            None => bail!(runtime_error_with_token(
+                format!("var {} is not defined", &name.lexeme),
+                name
+            )),
+        }
     }
 
     fn evaluate_literal(&mut self, literal: Option<Literal>) -> Result<Value> {
@@ -36,15 +136,6 @@ impl Interpreter {
 
     fn evaluate_grouping(&mut self, expr: &Expr) -> Result<Value> {
         self.evaluate(expr)
-    }
-
-    fn evaluate(&mut self, expr: &Expr) -> Result<Value> {
-        match expr {
-            Expr::Binary(left, operator, right) => self.evaluate_binary(left, operator, right),
-            Expr::Grouping(expr) => self.evaluate_grouping(expr),
-            Expr::Literal(literal) => self.evaluate_literal(literal.clone()),
-            Expr::Unary(operator, right) => self.evaluate_unary(operator, right),
-        }
     }
     fn evaluate_binary(&mut self, left: &Expr, operator: &Token, right: &Expr) -> Result<Value> {
         let left = self.evaluate(left)?;
@@ -198,20 +289,35 @@ fn runtime_error(message: String) -> ErrorKind {
 
 #[cfg(test)]
 mod tests {
-    use crate::{errors::*, interpreter::Value, parser::Parser, scanner::Scanner};
+    use crate::{
+        errors::*,
+        interpreter::Value,
+        parser::{Parser, Stmt},
+        scanner::Scanner,
+    };
     use std::f64::EPSILON;
 
     use super::Interpreter;
 
+    fn evaluate_expression_statement(
+        interpreter: &mut Interpreter,
+        statement: &Stmt,
+    ) -> Result<Value> {
+        if let Stmt::Expression(e) = statement {
+            return interpreter.evaluate(e);
+        }
+        panic!("unreachable code")
+    }
+
     #[test]
-    fn test_literal() -> Result<()> {
+    fn evaluate_literals() -> Result<()> {
         let mut scanner = Scanner::new("1.25".into());
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
-        let expr = parser.parse()?;
+        let statements = parser.parse()?;
         let mut interpreter = Interpreter::new();
         let expected = 1.25;
-        if let Value::Number(b) = interpreter.interpret(&expr)? {
+        if let Value::Number(b) = evaluate_expression_statement(&mut interpreter, &statements[0])? {
             assert!((expected - b).abs() < EPSILON);
         } else {
             return Err("Not a Number".into());
@@ -220,10 +326,11 @@ mod tests {
         let mut scanner = Scanner::new("true".into());
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
-        let expr = parser.parse()?;
+        let statements = parser.parse()?;
         let mut interpreter = Interpreter::new();
         let expected = true;
-        if let Value::Boolean(b) = interpreter.interpret(&expr)? {
+        if let Value::Boolean(b) = evaluate_expression_statement(&mut interpreter, &statements[0])?
+        {
             assert_eq!(expected, b);
         } else {
             return Err("Not a Boolean".into());
@@ -232,10 +339,10 @@ mod tests {
         let mut scanner = Scanner::new("\"String\"".into());
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
-        let expr = parser.parse()?;
+        let statements = parser.parse()?;
         let mut interpreter = Interpreter::new();
         let expected = "String";
-        if let Value::String(b) = interpreter.interpret(&expr)? {
+        if let Value::String(b) = evaluate_expression_statement(&mut interpreter, &statements[0])? {
             assert_eq!(expected, b);
         } else {
             return Err("Not a String".into());
@@ -244,14 +351,27 @@ mod tests {
     }
 
     #[test]
-    fn interprets_expressions() -> Result<()> {
+    fn evaluate_expressions() -> Result<()> {
+        let mut scanner = Scanner::new("-4".into());
+        let tokens = scanner.scan_tokens()?;
+        let mut parser = Parser::new(tokens);
+        let statements = parser.parse()?;
+        let mut interpreter = Interpreter::new();
+        let expected = -4.0;
+        if let Value::Number(num) = evaluate_expression_statement(&mut interpreter, &statements[0])?
+        {
+            assert!((num - expected).abs() < EPSILON);
+        } else {
+            return Err("Not a Number".into());
+        }
         let mut scanner = Scanner::new("2 + 3 - 4 / (2 * 3)".into());
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
-        let expr = parser.parse()?;
+        let statements = parser.parse()?;
         let mut interpreter = Interpreter::new();
         let expected = 2.0 + 3.0 - 4.0 / (2.0 * 3.0);
-        if let Value::Number(num) = interpreter.interpret(&expr)? {
+        if let Value::Number(num) = evaluate_expression_statement(&mut interpreter, &statements[0])?
+        {
             assert!((num - expected).abs() < EPSILON);
         } else {
             return Err("Not a Number".into());
@@ -260,10 +380,11 @@ mod tests {
         let mut scanner = Scanner::new("5 / 5 == 1.0".into());
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
-        let expr = parser.parse()?;
+        let statements = parser.parse()?;
         let mut interpreter = Interpreter::new();
         let expected = true;
-        if let Value::Boolean(b) = interpreter.interpret(&expr)? {
+        if let Value::Boolean(b) = evaluate_expression_statement(&mut interpreter, &statements[0])?
+        {
             assert_eq!(expected, b);
         } else {
             return Err("Not a Boolean".into());
@@ -272,10 +393,11 @@ mod tests {
         let mut scanner = Scanner::new("2 != nil".into());
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
-        let expr = parser.parse()?;
+        let statements = parser.parse()?;
         let mut interpreter = Interpreter::new();
         let expected = true;
-        if let Value::Boolean(b) = interpreter.interpret(&expr)? {
+        if let Value::Boolean(b) = evaluate_expression_statement(&mut interpreter, &statements[0])?
+        {
             assert_eq!(expected, b);
         } else {
             return Err("Not a Boolean".into());
@@ -284,10 +406,11 @@ mod tests {
         let mut scanner = Scanner::new("\"string\" != nil".into());
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
-        let expr = parser.parse()?;
+        let statements = parser.parse()?;
         let mut interpreter = Interpreter::new();
         let expected = true;
-        if let Value::Boolean(b) = interpreter.interpret(&expr)? {
+        if let Value::Boolean(b) = evaluate_expression_statement(&mut interpreter, &statements[0])?
+        {
             assert_eq!(expected, b);
         } else {
             return Err("Not a Boolean".into());
@@ -296,14 +419,52 @@ mod tests {
         let mut scanner = Scanner::new("\"hello\" +\" \" + \"world\" + \"!\"".into());
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
-        let expr = parser.parse()?;
+        let statements = parser.parse()?;
         let mut interpreter = Interpreter::new();
         let expected = "hello world!".to_string();
-        if let Value::String(s) = interpreter.interpret(&expr)? {
+        if let Value::String(s) = evaluate_expression_statement(&mut interpreter, &statements[0])? {
             assert_eq!(expected, s);
         } else {
             return Err("Not a Boolean".into());
         }
+        Ok(())
+    }
+
+    fn utf8_to_string(bytes: &[u8]) -> String {
+        match String::from_utf8(bytes.to_vec()) {
+            Ok(s) => s,
+            Err(_) => String::new(),
+        }
+    }
+
+    #[test]
+    fn execute_statements() -> Result<()> {
+        // let mut scanner = Scanner::new("print \"hello\" +\" \" + \"world\" + \"!\";".into());
+        // let tokens = scanner.scan_tokens()?;
+        // let mut parser = Parser::new(tokens);
+        // let statements = parser.parse()?;
+        // let mut buf = vec![];
+        // let mut interpreter = Interpreter::new_with_writer(&mut buf);
+        // let expected = "hello world!\n".to_string();
+        // interpreter.interpret(&statements)?;
+        // assert_eq!(expected, utf8_to_string(&buf));
+
+        let mut scanner = Scanner::new(
+            r#"
+        var a = 10;
+        var b = 2 * a - a;
+        print a == b;
+        "#
+            .into(),
+        );
+        let tokens = scanner.scan_tokens()?;
+        let mut parser = Parser::new(tokens);
+        let statements = parser.parse()?;
+        let mut buf = vec![];
+        let mut interpreter = Interpreter::new_with_writer(&mut buf);
+        let expected = "true\n".to_string();
+        interpreter.interpret(&statements)?;
+        assert_eq!(expected, utf8_to_string(&buf));
         Ok(())
     }
 }

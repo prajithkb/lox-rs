@@ -7,16 +7,19 @@ use std::{
 use log::{debug, error};
 
 use crate::{errors::*, interpreter::Interpreter, parser::Parser, scanner::Scanner};
-pub struct Lox {
+pub struct Lox<'a> {
     had_error: bool,
     had_runtime_error: bool,
+    interpreter: Interpreter<'a>,
 }
 
-impl Lox {
+impl<'a> Lox<'a> {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Lox {
             had_error: false,
             had_runtime_error: false,
+            interpreter: Interpreter::new(),
         }
     }
 
@@ -41,23 +44,18 @@ impl Lox {
 
     pub fn run(&mut self, content: String) -> Result<()> {
         let mut scanner = Scanner::new(content);
-        let mut interpreter = Interpreter::new();
+
         match scanner.scan_tokens() {
             Ok(tokens) => {
                 debug!("Created Tokens : {:?}", tokens);
                 let mut parser = Parser::new(tokens);
                 match parser.parse() {
-                    Ok(expr) => {
-                        debug!("Created (AST) Expr: {}", expr);
-                        match interpreter.interpret(&expr) {
-                            Ok(result) => {
-                                self.had_runtime_error = true;
-                                debug!("Interpreted result: {:?}", result);
-                                println!("Interpreted result: {:?}", result);
-                                Ok(())
-                            }
+                    Ok(statements) => {
+                        debug!("Created (AST) Statements: {:?}", statements);
+                        match self.interpreter.interpret(&statements) {
+                            Ok(_) => Ok(()),
                             Err(e) => {
-                                self.had_error = true;
+                                self.had_runtime_error = true;
                                 error!("{}", e);
                                 Ok(())
                             }
@@ -96,16 +94,15 @@ impl Lox {
     }
 }
 
-impl Default for Lox {
-    fn default() -> Self {
-        Self::new()
-    }
+pub fn report_error(line: usize, message: String, error_writer: &mut dyn Write) {
+    report(line, "".into(), message, error_writer);
 }
 
-pub fn report_error(line: usize, message: String) {
-    report(line, "".into(), message);
-}
-
-pub fn report(line: usize, location: String, message: String) {
-    eprintln!("[line: {}] Error {}: message: {}", line, location, message);
+pub fn report(line: usize, location: String, message: String, error_writer: &mut dyn Write) {
+    writeln!(
+        error_writer,
+        "[line: {}] Error {}: message: {}",
+        line, location, message
+    )
+    .expect("Write failed");
 }

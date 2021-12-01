@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::{collections::HashMap, io::stderr};
 
 use log::{debug, error};
 
@@ -119,7 +119,11 @@ impl Scanner {
                 } else if current_char.is_ascii_alphabetic() || current_char == '_' {
                     self.add_identifier();
                 } else {
-                    report_error(self.line, format!("Unexpected character {}", current_char));
+                    report_error(
+                        self.line,
+                        format!("Unexpected character {}", current_char),
+                        &mut stderr(),
+                    );
                     bail!(ErrorKind::ScanError(format!(
                         "Unexpected character {}",
                         current_char
@@ -139,10 +143,14 @@ impl Scanner {
         }
         if self.is_at_end() {
             let l = &self.source[self.start..self.current];
-            report_error(self.line, format!("Unterminated String literal {}", l));
+            report_error(
+                self.line,
+                format!("Unterminated String literal {}", l),
+                &mut stderr(),
+            );
             bail!(format!("Unterminated String literal {}", l))
         }
-        // advance to conver the closing '"'
+        // advance to convert the closing '"'
         self.advance();
         // get the value from "[...]", excluding the '"'
         let string = self.source[self.start + 1..self.current - 1].to_string();
@@ -164,7 +172,11 @@ impl Scanner {
         if let Ok(number) = number_string.parse::<f64>() {
             self.add_token(TokenType::Number, Literal::opt_number(number))
         } else {
-            report_error(self.line, format!("{} Not a valid number", number_string));
+            report_error(
+                self.line,
+                format!("{} Not a valid number", number_string),
+                &mut stderr(),
+            );
             bail!(format!("{} is not a number", number_string))
         }
         Ok(())
@@ -310,7 +322,7 @@ mod tests {
         ];
         assert_eq!(expected, tokens);
 
-        source = "5/5 ==1";
+        source = "5/5 ==1;";
         scanner = Scanner::new(source.into());
         tokens = scanner.scan_tokens()?;
         assert_eq!(
@@ -320,6 +332,7 @@ mod tests {
                 Token::new(TokenType::Number, "5".into(), 1, Literal::opt_number(5.0)),
                 Token::new(TokenType::EqualEqual, "==".into(), 1, None),
                 Token::new(TokenType::Number, "1".into(), 1, Literal::opt_number(1.0)),
+                Token::new(TokenType::Semicolon, ";".into(), 1, Literal::opt_none()),
                 Token::new(TokenType::Eof, "".into(), 1, None)
             ],
             tokens

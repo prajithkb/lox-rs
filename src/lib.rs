@@ -17,6 +17,10 @@ mod errors {
                 display("Runtime Error: {}", message)
             }
         }
+
+        foreign_links {
+            Io(::std::io::Error) #[cfg(unix)];
+        }
     }
 }
 pub use errors::*;
