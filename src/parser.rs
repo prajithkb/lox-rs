@@ -1,7 +1,7 @@
-use log::error;
+use log::debug;
 
-use crate::{errors::*, lox::report, tokens::TokenType};
-use std::{fmt::Display, io::stderr};
+use crate::{errors::*, lox::report_error, tokens::TokenType};
+use std::{fmt::Display, io::stdout};
 
 use crate::tokens::{Literal, Token};
 
@@ -13,6 +13,7 @@ pub enum Expr {
     Literal(Option<Literal>),
     Unary(Token, Box<Expr>),
     Var(Token),
+    Assign(Token, Box<Expr>),
 }
 
 impl Display for Expr {
@@ -49,6 +50,7 @@ fn to_string_expr(expr: &Expr) -> String {
         Expr::Literal(literal) => parenthesize(&literal_to_str(literal), &[]),
         Expr::Unary(operator, expr) => parenthesize(&operator.lexeme, &[expr]),
         Expr::Var(token) => parenthesize(&format!("Var {}", &token.lexeme), &[]),
+        Expr::Assign(token, expr) => parenthesize(&format!("{} = ", &token.lexeme), &[expr]),
     }
 }
 
@@ -72,17 +74,11 @@ fn parenthesize(name: &str, exprs: &[&Expr]) -> String {
     result
 }
 
-fn report_error_for_token(token: &Token, message: String) {
-    if token.token_type == TokenType::Eof {
-        report(token.line, "at the end".into(), message, &mut stderr())
-    } else {
-        report(
-            token.line,
-            format!("at '{}'", token.lexeme),
-            message,
-            &mut stderr(),
-        )
-    }
+fn parse_error(token: &Token, message: &str) -> ErrorKind {
+    ErrorKind::ParseError(format!(
+        "[line: {}] Error at '{}': message: {}",
+        token.line, token.lexeme, message
+    ))
 }
 
 ///  Grammer from https://craftinginterpreters.com/parsing-expressions.html
@@ -91,7 +87,8 @@ fn report_error_for_token(token: &Token, message: String) {
 /// declaration    → varDecl | statement ;
 /// varDecl        → "var" IDENTIFIER ( "=" expression )? ";"
 /// statement      → exprStmt | printStmt ;
-/// exprStmt       → expression ";" ;
+/// expression     → assignment ;
+/// assignment     → IDENTIFIER "=" assignment | equality ;
 /// printStmt      → "print" expression ";" ;
 /// expression     → equality ;
 /// equality       → comparison ( ( "!=" | "==" ) comparison )* ;
@@ -116,17 +113,24 @@ impl<'a> Parser<'a> {
     }
 
     pub fn parse(&mut self) -> Result<Vec<Stmt>> {
+        let mut parse_error = false;
         let mut statements = vec![];
         while !self.is_at_end() {
             match self.declaration() {
                 Ok(s) => statements.push(s),
                 Err(e) => {
-                    error!("Parse error {}", e);
+                    parse_error = true;
+                    debug!("Error: {}", e);
+                    report_error(e.to_string(), &mut stdout());
                     self.synchronize();
                 }
             }
         }
-        Ok(statements)
+        if !parse_error {
+            Ok(statements)
+        } else {
+            bail!(ErrorKind::ParseError("Parsing failed".into()))
+        }
     }
 
     fn declaration(&mut self) -> Result<Stmt> {
@@ -147,27 +151,23 @@ impl<'a> Parser<'a> {
 
     fn print_statement(&mut self) -> Result<Stmt> {
         let expr = self.expression()?;
-        match self.consume_next_token(TokenType::Semicolon, "Expect ';' after print".into()) {
-            Ok(_) => Ok(Stmt::Print(Box::new(expr))),
-            Err(e) => Err(e),
-        }
+        self.consume_next_token(TokenType::Semicolon, "Expect ';' after print")
+            .map(|_| Ok(Stmt::Print(Box::new(expr))))?
     }
 
     fn var_declaration_statement(&mut self) -> Result<Stmt> {
-        match self.consume_next_token(TokenType::Identifier, "Expect variable name".into()) {
+        match self.consume_next_token(TokenType::Identifier, "Expect variable name") {
             Ok(token) => {
-                if self.match_and_advance(&[TokenType::Equal]) {
-                    let initializer = self.expression()?;
-                    match self.consume_next_token(
-                        TokenType::Semicolon,
-                        "Expect ';' after variable declaration".into(),
-                    ) {
-                        Ok(_) => Ok(Stmt::Var(token, Some(Box::new(initializer)))),
-                        Err(e) => Err(e),
-                    }
+                let initializer = if self.match_and_advance(&[TokenType::Equal]) {
+                    Some(Box::new(self.expression()?))
                 } else {
-                    Ok(Stmt::Var(token, None))
-                }
+                    None
+                };
+                self.consume_next_token(
+                    TokenType::Semicolon,
+                    "Expect ';' after variable declaration",
+                )
+                .map(|_| Ok(Stmt::Var(token, initializer)))?
             }
             Err(e) => Err(e),
         }
@@ -175,15 +175,27 @@ impl<'a> Parser<'a> {
 
     fn expression_statement(&mut self) -> Result<Stmt> {
         let expr = self.expression()?;
-        match self.consume_next_token(TokenType::Semicolon, "Expect ';' after expression".into()) {
-            Ok(_) => Ok(Stmt::Expression(Box::new(expr))),
-            Err(e) => Err(e),
-        }
+        self.consume_next_token(TokenType::Semicolon, "Expect ';' after expression")
+            .map(|_| Ok(Stmt::Expression(Box::new(expr))))?
     }
 
     fn expression(&mut self) -> Result<Expr> {
-        self.equality()
+        self.assignment()
     }
+
+    fn assignment(&mut self) -> Result<Expr> {
+        let expr = self.equality()?;
+        if self.match_and_advance(&[TokenType::Equal]) {
+            let equals = self.previous();
+            let value = self.assignment()?;
+            if let Expr::Var(name) = expr {
+                return Ok(Expr::Assign(name, Box::new(value)));
+            }
+            bail!(parse_error(&equals, "Invalid assignment target"))
+        }
+        Ok(expr)
+    }
+
     fn equality(&mut self) -> Result<Expr> {
         let mut expr = self.comparison()?;
         while self.match_and_advance(&[TokenType::BangEqual, TokenType::EqualEqual]) {
@@ -259,17 +271,11 @@ impl<'a> Parser<'a> {
             TokenType::LeftParen => {
                 self.advance();
                 let expr = self.expression()?;
-                match self.consume_next_token(
-                    TokenType::RightParen,
-                    "Expected ')' after  expression".to_string(),
-                ) {
-                    Ok(_) => Ok(Expr::Grouping(Box::new(expr))),
-                    Err(e) => Err(e),
-                }
+                self.consume_next_token(TokenType::RightParen, "Expected ')' after  expression")
+                    .map(|_| Ok(Expr::Grouping(Box::new(expr))))?
             }
             _ => {
-                report_error_for_token(&t, "Expect expression".to_string());
-                Err(format!("Expected expression, unexpected Token -> {:?}", &t).into())
+                bail!(parse_error(&t, "Expect expression"))
             }
         }
     }
@@ -277,16 +283,15 @@ impl<'a> Parser<'a> {
     fn consume_next_token(
         &mut self,
         token_type_to_match: TokenType,
-        message: String,
+        message: &str,
     ) -> Result<Token> {
         let t = self.peek_token();
+        let previous = self.previous();
         if t.token_type == token_type_to_match {
-            let previous = self.peek_token();
             self.advance();
-            Ok(previous)
+            Ok(t)
         } else {
-            report_error_for_token(&t, message.clone());
-            bail!(ErrorKind::ParseError(message))
+            bail!(parse_error(&previous, message))
         }
     }
     fn match_and_advance(&mut self, token_types_to_match: &[TokenType]) -> bool {
@@ -395,12 +400,12 @@ mod tests {
         let mut scanner = Scanner::new("-4;".into());
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
-        let statements = parser.parse().unwrap();
+        let statements = parser.parse()?;
         assert_eq!("(- (Number(4.0)))", statements[0].to_string());
         let mut scanner = Scanner::new("2 + 3 - 4 / (2 * 3);".into());
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
-        let expr = parser.parse().unwrap();
+        let expr = parser.parse()?;
         assert_eq!(
             "(- (+ (Number(2.0)) (Number(3.0))) (/ (Number(4.0)) (Grouping (* (Number(2.0)) (Number(3.0))))))",
             expr[0].to_string()
@@ -409,7 +414,7 @@ mod tests {
         let mut scanner = Scanner::new("3 - 4 / 3 + 4 * 6 -(3 -4);".into());
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
-        let statements = parser.parse().unwrap();
+        let statements = parser.parse()?;
         assert_eq!("(- (+ (- (Number(3.0)) (/ (Number(4.0)) (Number(3.0)))) (* (Number(4.0)) (Number(6.0)))) (Grouping (- (Number(3.0)) (Number(4.0)))))",
         statements[0].to_string()
         );
@@ -417,7 +422,7 @@ mod tests {
         let mut scanner = Scanner::new("5 / 5 == 1;".into());
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
-        let statements = parser.parse().unwrap();
+        let statements = parser.parse()?;
         assert_eq!(
             "(== (/ (Number(5.0)) (Number(5.0))) (Number(1.0)))",
             statements[0].to_string()
@@ -426,11 +431,17 @@ mod tests {
         let mut scanner = Scanner::new("\"hello\" + \"world\";".into());
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
-        let statements = parser.parse().unwrap();
+        let statements = parser.parse()?;
         assert_eq!(
             "(+ (String(\"hello\")) (String(\"world\")))",
             statements[0].to_string()
         );
+
+        let mut scanner = Scanner::new("a = 2;".into());
+        let tokens = scanner.scan_tokens()?;
+        let mut parser = Parser::new(tokens);
+        let statements = parser.parse()?;
+        assert_eq!("(a =  (Number(2.0)))", statements[0].to_string());
         Ok(())
     }
 }

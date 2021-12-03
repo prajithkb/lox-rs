@@ -1,6 +1,7 @@
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::fmt::{write, Display};
-use std::io::{stdout, BufWriter, Write};
+use std::fmt::Display;
+use std::io::Write;
 
 use crate::parser::{Expr, Stmt};
 
@@ -46,6 +47,10 @@ impl Environment {
     pub fn get(&self, name: &str) -> Option<Value> {
         self.values.get(name).cloned()
     }
+
+    pub fn entry(&mut self, name: &str) -> Entry<String, Value> {
+        self.values.entry(name.to_string())
+    }
 }
 
 pub struct Interpreter<'a> {
@@ -61,7 +66,8 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    pub fn new_with_writer(output_writer: &'a mut dyn Write) -> Self {
+    #[allow(dead_code)]
+    fn new_with_writer(output_writer: &'a mut dyn Write) -> Self {
         Interpreter {
             environment: Environment::new(),
             output_writer: Some(output_writer),
@@ -109,6 +115,21 @@ impl<'a> Interpreter<'a> {
             Expr::Literal(literal) => self.evaluate_literal(literal.clone()),
             Expr::Unary(operator, right) => self.evaluate_unary(operator, right),
             Expr::Var(name) => self.evaluate_var(name),
+            Expr::Assign(name, expr) => self.evaluate_assignment(name, expr),
+        }
+    }
+
+    fn evaluate_assignment(&mut self, name: &Token, expr: &Expr) -> Result<Value> {
+        let value = self.evaluate(expr)?;
+        match self.environment.entry(&name.lexeme) {
+            Entry::Occupied(mut entry) => {
+                entry.insert(value.clone());
+                Ok(value)
+            }
+            Entry::Vacant(_) => bail!(runtime_error_with_token(
+                format!("var {} is not defined", &name.lexeme),
+                name
+            )),
         }
     }
 
@@ -280,7 +301,10 @@ fn bang_value(value: Value) -> Result<Value> {
 }
 
 fn runtime_error_with_token(message: String, token: &Token) -> ErrorKind {
-    ErrorKind::RuntimeError(format!("{} [line: {}]", message, token.line))
+    ErrorKind::RuntimeError(format!(
+        "[line: {}] Error at '{}': {} ",
+        token.line, token.lexeme, message
+    ))
 }
 
 fn runtime_error(message: String) -> ErrorKind {
@@ -311,7 +335,7 @@ mod tests {
 
     #[test]
     fn evaluate_literals() -> Result<()> {
-        let mut scanner = Scanner::new("1.25".into());
+        let mut scanner = Scanner::new("1.25;".into());
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
         let statements = parser.parse()?;
@@ -323,7 +347,7 @@ mod tests {
             return Err("Not a Number".into());
         }
 
-        let mut scanner = Scanner::new("true".into());
+        let mut scanner = Scanner::new("true;".into());
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
         let statements = parser.parse()?;
@@ -336,7 +360,7 @@ mod tests {
             return Err("Not a Boolean".into());
         }
 
-        let mut scanner = Scanner::new("\"String\"".into());
+        let mut scanner = Scanner::new("\"String\";".into());
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
         let statements = parser.parse()?;
@@ -352,7 +376,7 @@ mod tests {
 
     #[test]
     fn evaluate_expressions() -> Result<()> {
-        let mut scanner = Scanner::new("-4".into());
+        let mut scanner = Scanner::new("-4;".into());
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
         let statements = parser.parse()?;
@@ -364,7 +388,7 @@ mod tests {
         } else {
             return Err("Not a Number".into());
         }
-        let mut scanner = Scanner::new("2 + 3 - 4 / (2 * 3)".into());
+        let mut scanner = Scanner::new("2 + 3 - 4 / (2 * 3);".into());
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
         let statements = parser.parse()?;
@@ -377,7 +401,7 @@ mod tests {
             return Err("Not a Number".into());
         }
 
-        let mut scanner = Scanner::new("5 / 5 == 1.0".into());
+        let mut scanner = Scanner::new("5 / 5 == 1.0;".into());
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
         let statements = parser.parse()?;
@@ -390,7 +414,7 @@ mod tests {
             return Err("Not a Boolean".into());
         }
 
-        let mut scanner = Scanner::new("2 != nil".into());
+        let mut scanner = Scanner::new("2 != nil;".into());
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
         let statements = parser.parse()?;
@@ -403,7 +427,7 @@ mod tests {
             return Err("Not a Boolean".into());
         }
 
-        let mut scanner = Scanner::new("\"string\" != nil".into());
+        let mut scanner = Scanner::new("\"string\" != nil;".into());
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
         let statements = parser.parse()?;
@@ -416,7 +440,7 @@ mod tests {
             return Err("Not a Boolean".into());
         }
 
-        let mut scanner = Scanner::new("\"hello\" +\" \" + \"world\" + \"!\"".into());
+        let mut scanner = Scanner::new("\"hello\" +\" \" + \"world\" + \"!\";".into());
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
         let statements = parser.parse()?;
@@ -439,15 +463,15 @@ mod tests {
 
     #[test]
     fn execute_statements() -> Result<()> {
-        // let mut scanner = Scanner::new("print \"hello\" +\" \" + \"world\" + \"!\";".into());
-        // let tokens = scanner.scan_tokens()?;
-        // let mut parser = Parser::new(tokens);
-        // let statements = parser.parse()?;
-        // let mut buf = vec![];
-        // let mut interpreter = Interpreter::new_with_writer(&mut buf);
-        // let expected = "hello world!\n".to_string();
-        // interpreter.interpret(&statements)?;
-        // assert_eq!(expected, utf8_to_string(&buf));
+        let mut scanner = Scanner::new("print \"hello\" +\" \" + \"world\" + \"!\";".into());
+        let tokens = scanner.scan_tokens()?;
+        let mut parser = Parser::new(tokens);
+        let statements = parser.parse()?;
+        let mut buf = vec![];
+        let mut interpreter = Interpreter::new_with_writer(&mut buf);
+        let expected = "hello world!\n".to_string();
+        interpreter.interpret(&statements)?;
+        assert_eq!(expected, utf8_to_string(&buf));
 
         let mut scanner = Scanner::new(
             r#"

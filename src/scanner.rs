@@ -1,12 +1,16 @@
 use std::{collections::HashMap, io::stderr};
 
-use log::{debug, error};
+use log::debug;
 
 use crate::{
     errors::*,
-    lox::report_error,
+    lox::{report_error, report_error_with_line},
     tokens::{Literal, Token, TokenType},
 };
+
+fn scan_error(line: usize, message: &str) -> ErrorKind {
+    ErrorKind::ScanError(format!("[line: {}] Error : message: {}", line, message))
+}
 
 pub struct Scanner {
     source: String,
@@ -57,8 +61,9 @@ impl Scanner {
             match self.scan_token() {
                 Ok(_) => continue,
                 Err(e) => {
-                    error!("Found error during scan: {}", e);
                     error_found = true;
+                    report_error(e.to_string(), &mut stderr());
+                    debug!("{}", e);
                 }
             }
         }
@@ -119,15 +124,10 @@ impl Scanner {
                 } else if current_char.is_ascii_alphabetic() || current_char == '_' {
                     self.add_identifier();
                 } else {
-                    report_error(
+                    bail!(scan_error(
                         self.line,
-                        format!("Unexpected character {}", current_char),
-                        &mut stderr(),
-                    );
-                    bail!(ErrorKind::ScanError(format!(
-                        "Unexpected character {}",
-                        current_char
-                    )));
+                        &format!("Unexpected character {}", current_char)
+                    ))
                 }
             }
         }
@@ -143,12 +143,15 @@ impl Scanner {
         }
         if self.is_at_end() {
             let l = &self.source[self.start..self.current];
-            report_error(
+            report_error_with_line(
                 self.line,
                 format!("Unterminated String literal {}", l),
                 &mut stderr(),
             );
-            bail!(format!("Unterminated String literal {}", l))
+            bail!(scan_error(
+                self.line,
+                &format!("Unterminated String literal {}", l)
+            ))
         }
         // advance to convert the closing '"'
         self.advance();
@@ -172,12 +175,15 @@ impl Scanner {
         if let Ok(number) = number_string.parse::<f64>() {
             self.add_token(TokenType::Number, Literal::opt_number(number))
         } else {
-            report_error(
+            report_error_with_line(
                 self.line,
                 format!("{} Not a valid number", number_string),
                 &mut stderr(),
             );
-            bail!(format!("{} is not a number", number_string))
+            bail!(scan_error(
+                self.line,
+                &format!("{} Not a valid number", number_string)
+            ))
         }
         Ok(())
     }

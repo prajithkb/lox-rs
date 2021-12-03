@@ -9,7 +9,7 @@ fn main() -> Result<()> {
     let mut lox = Lox::new();
     match args.len().cmp(two) {
         std::cmp::Ordering::Less => lox.run_prompt()?,
-        std::cmp::Ordering::Equal => lox.run_script(&args[1])?,
+        std::cmp::Ordering::Equal => lox.run_script_with_exit_code(&args[1]),
         std::cmp::Ordering::Greater => {
             println!("Usage: lox-rs [script]");
             exit(64);
