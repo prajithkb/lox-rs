@@ -31,12 +31,14 @@ impl Display for Value {
 
 struct Environment {
     values: HashMap<String, Value>,
+    enclosing: Option<Box<Environment>>,
 }
 
 impl Environment {
-    pub fn new() -> Self {
+    pub fn new(enclosing: Option<Box<Environment>>) -> Self {
         Environment {
             values: HashMap::new(),
+            enclosing,
         }
     }
 
@@ -44,24 +46,42 @@ impl Environment {
         self.values.insert(name, value)
     }
 
-    pub fn get(&self, name: &str) -> Option<Value> {
-        self.values.get(name).cloned()
+    pub fn assign(&mut self, name: &str, value: Value) -> Option<Value> {
+        match self.values.entry(name.to_string()) {
+            Entry::Occupied(mut entry) => {
+                let previous_value = entry.insert(value);
+                Some(previous_value)
+            }
+            Entry::Vacant(_) => {
+                if let Some(e) = &mut self.enclosing {
+                    e.assign(name, value)
+                } else {
+                    None
+                }
+            }
+        }
     }
 
-    pub fn entry(&mut self, name: &str) -> Entry<String, Value> {
-        self.values.entry(name.to_string())
+    pub fn get(&self, name: &str) -> Option<Value> {
+        match self.values.get(name) {
+            Some(v) => Some(v.clone()),
+            None => match &self.enclosing {
+                Some(e) => e.get(name),
+                None => None,
+            },
+        }
     }
 }
 
 pub struct Interpreter<'a> {
-    environment: Environment,
+    environment: Option<Box<Environment>>,
     output_writer: Option<&'a mut dyn Write>,
 }
 
 impl<'a> Interpreter<'a> {
     pub fn new() -> Self {
         Interpreter {
-            environment: Environment::new(),
+            environment: Some(Box::new(Environment::new(None))),
             output_writer: None,
         }
     }
@@ -69,9 +89,13 @@ impl<'a> Interpreter<'a> {
     #[allow(dead_code)]
     fn new_with_writer(output_writer: &'a mut dyn Write) -> Self {
         Interpreter {
-            environment: Environment::new(),
+            environment: Some(Box::new(Environment::new(None))),
             output_writer: Some(output_writer),
         }
+    }
+
+    fn environment(&mut self) -> &mut Environment {
+        self.environment.as_mut().unwrap()
     }
 
     pub fn interpret(&mut self, statements: &[Stmt]) -> Result<()> {
@@ -86,6 +110,7 @@ impl<'a> Interpreter<'a> {
             Stmt::Expression(e) => self.evaluate(e).map(|_| Ok(()))?,
             Stmt::Print(e) => self.print_statement(e),
             Stmt::Var(token, expr) => self.var_statement(token, expr),
+            Stmt::Block(statements) => self.block(statements),
         }
     }
 
@@ -104,7 +129,19 @@ impl<'a> Interpreter<'a> {
             Some(e) => self.evaluate(e)?,
             None => Value::Nil,
         };
-        self.environment.define(name, value);
+        self.environment().define(name, value);
+        Ok(())
+    }
+
+    fn block(&mut self, statements: &[Stmt]) -> Result<()> {
+        self.environment = Some(Box::new(Environment::new(self.environment.take())));
+        for statement in statements {
+            self.execute(statement).map_err(|e| {
+                self.environment = self.environment().enclosing.take();
+                e
+            })?;
+        }
+        self.environment = self.environment().enclosing.take();
         Ok(())
     }
 
@@ -121,12 +158,9 @@ impl<'a> Interpreter<'a> {
 
     fn evaluate_assignment(&mut self, name: &Token, expr: &Expr) -> Result<Value> {
         let value = self.evaluate(expr)?;
-        match self.environment.entry(&name.lexeme) {
-            Entry::Occupied(mut entry) => {
-                entry.insert(value.clone());
-                Ok(value)
-            }
-            Entry::Vacant(_) => bail!(runtime_error_with_token(
+        match self.environment().assign(&name.lexeme, value.clone()) {
+            Some(_) => Ok(value),
+            None => bail!(runtime_error_with_token(
                 format!("var {} is not defined", &name.lexeme),
                 name
             )),
@@ -134,7 +168,7 @@ impl<'a> Interpreter<'a> {
     }
 
     fn evaluate_var(&mut self, name: &Token) -> Result<Value> {
-        match self.environment.get(&name.lexeme) {
+        match self.environment().get(&name.lexeme) {
             Some(v) => Ok(v),
             None => bail!(runtime_error_with_token(
                 format!("var {} is not defined", &name.lexeme),
@@ -271,10 +305,22 @@ fn add(left: Value, right: Value, token: &Token) -> Result<Value> {
             result.push_str(r);
             Ok(Value::String(result))
         }
-
+        // If one of them is a string, we convert the one to string
+        (Value::String(l), any) => {
+            let mut result = String::new();
+            result.push_str(l);
+            result.push_str(&any.to_string());
+            Ok(Value::String(result))
+        }
+        (any, Value::String(r)) => {
+            let mut result = String::new();
+            result.push_str(&any.to_string());
+            result.push_str(r);
+            Ok(Value::String(result))
+        }
         _ => bail!(runtime_error_with_token(
             format!(
-                "Cannot perform {:?} + {:?}, they need to be numbers or strings",
+                "Cannot perform {:?} + {:?}, they need to be both numbers or strings",
                 left, right
             ),
             token
@@ -302,7 +348,7 @@ fn bang_value(value: Value) -> Result<Value> {
 
 fn runtime_error_with_token(message: String, token: &Token) -> ErrorKind {
     ErrorKind::RuntimeError(format!(
-        "[line: {}] Error at '{}': {} ",
+        "[line: {}] Error at <{}>: {}",
         token.line, token.lexeme, message
     ))
 }
@@ -321,7 +367,7 @@ mod tests {
     };
     use std::f64::EPSILON;
 
-    use super::Interpreter;
+    use super::{Environment, Interpreter};
 
     fn evaluate_expression_statement(
         interpreter: &mut Interpreter,
@@ -490,5 +536,87 @@ mod tests {
         interpreter.interpret(&statements)?;
         assert_eq!(expected, utf8_to_string(&buf));
         Ok(())
+    }
+
+    #[test]
+    fn scoped_statements() -> Result<()> {
+        let mut scanner = Scanner::new(
+            r#"
+            // Scopes
+            var outer = "outer variable";
+            print outer; 
+            {
+                outer = "outer variable set to inner variable";
+                print outer;
+                var inner = "created a new inner variable";
+                print inner;
+            }
+            print outer;
+            print inner;
+        "#
+            .into(),
+        );
+        let tokens = scanner.scan_tokens()?;
+        let mut parser = Parser::new(tokens);
+        let statements = parser.parse()?;
+        let mut buf = vec![];
+        let mut interpreter = Interpreter::new_with_writer(&mut buf);
+        let expected = r#"outer variable
+outer variable set to inner variable
+created a new inner variable
+outer variable set to inner variable
+"#
+        .to_string();
+        match interpreter.interpret(&statements) {
+            Ok(_) => panic!("Should fail!"),
+            Err(e) => assert_eq!(
+                "Runtime Error: [line: 12] Error at <inner>: var inner is not defined",
+                e.to_string()
+            ),
+        }
+        // assert_eq!(
+        //     Err(ErrorKind::RuntimeError("".into())),
+        //     interpreter.interpret(&statements),
+        // );
+        assert_eq!(expected, utf8_to_string(&buf));
+        Ok(())
+    }
+
+    #[test]
+    fn environment_tests() {
+        let mut env = Environment::new(None);
+        assert_eq!(None, env.get("outer"));
+        assert_eq!(
+            None,
+            env.define("outer".to_string(), Value::String("outer".into()))
+        );
+        assert_eq!(Some(Value::String("outer".into())), env.get("outer"));
+        assert_eq!(
+            Some(Value::String("outer".into())),
+            env.assign("outer", Value::String("outer changed".into()))
+        );
+        assert_eq!(
+            Some(Value::String("outer changed".into())),
+            env.get("outer")
+        );
+        let mut env = Environment::new(Some(Box::new(env)));
+        assert_eq!(
+            Some(Value::String("outer changed".into())),
+            env.get("outer")
+        );
+        assert_eq!(
+            Some(Value::String("outer changed".into())),
+            env.assign("outer", Value::String("outer changed by inner".into()))
+        );
+        assert_eq!(
+            Some(Value::String("outer changed by inner".into())),
+            env.get("outer")
+        );
+        assert_eq!(
+            None,
+            env.define("inner".to_string(), Value::String("inner".into()))
+        );
+        assert_eq!(Some(Value::String("inner".into())), env.get("inner"));
+        assert_eq!(None, env.enclosing.unwrap().get("inner"));
     }
 }

@@ -1,7 +1,10 @@
-var a = 2;
-print a;
-var b = a;
-print b;
-var b = a + 5;
-print a + b;
-print "It" + " is " + "over!";
+// Sample script
+// Assignments
+var hello = "hello";
+var world = "world";
+print hello + " " + world;
+// expressions
+var one = 1;
+var ten = 10;
+var hundred = one + 2 * one + 3 * one + 4 * one + (9 * ten);
+print "one hundred == "+ hundred + " is " + (hundred == 100);

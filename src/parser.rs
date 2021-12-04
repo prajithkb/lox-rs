@@ -28,6 +28,7 @@ pub enum Stmt {
     Expression(Box<Expr>),
     Print(Box<Expr>),
     Var(Token, Option<Box<Expr>>),
+    Block(Vec<Stmt>),
 }
 
 impl Display for Stmt {
@@ -59,6 +60,14 @@ fn to_string_stmt(stmt: &Stmt) -> String {
         Stmt::Expression(expr) => expr.to_string(),
         Stmt::Print(expr) => format!("Print {}", expr.to_string()),
         Stmt::Var(token, expr) => format!("Var {} = {:?}", token.lexeme, expr),
+        Stmt::Block(statements) => format!(
+            "Block [{}]",
+            statements
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<String>>()
+                .join(", "),
+        ),
     }
 }
 
@@ -76,7 +85,7 @@ fn parenthesize(name: &str, exprs: &[&Expr]) -> String {
 
 fn parse_error(token: &Token, message: &str) -> ErrorKind {
     ErrorKind::ParseError(format!(
-        "[line: {}] Error at '{}': message: {}",
+        "[line: {}] Error at <{}>: message: {}",
         token.line, token.lexeme, message
     ))
 }
@@ -86,7 +95,8 @@ fn parse_error(token: &Token, message: &str) -> ErrorKind {
 /// program        → declaration* EOF ;
 /// declaration    → varDecl | statement ;
 /// varDecl        → "var" IDENTIFIER ( "=" expression )? ";"
-/// statement      → exprStmt | printStmt ;
+/// statement      → exprStmt | printStmt | block ;
+/// block          → "{" declaration* "}" ;
 /// expression     → assignment ;
 /// assignment     → IDENTIFIER "=" assignment | equality ;
 /// printStmt      → "print" expression ";" ;
@@ -133,6 +143,16 @@ impl<'a> Parser<'a> {
         }
     }
 
+    fn block(&mut self) -> Result<Stmt> {
+        let mut statements = vec![];
+        while !self.is_at_end() && self.peek_token().token_type != TokenType::RightBrace {
+            let statement = self.declaration()?;
+            statements.push(statement);
+        }
+        self.consume_next_token(TokenType::RightBrace, "Expect '}' at the end of a block")
+            .map(|_| Ok(Stmt::Block(statements)))?
+    }
+
     fn declaration(&mut self) -> Result<Stmt> {
         if self.match_and_advance(&[TokenType::Var]) {
             self.var_declaration_statement()
@@ -144,6 +164,8 @@ impl<'a> Parser<'a> {
     fn statement(&mut self) -> Result<Stmt> {
         if self.match_and_advance(&[TokenType::Print]) {
             self.print_statement()
+        } else if self.match_and_advance(&[TokenType::LeftBrace]) {
+            self.block()
         } else {
             self.expression_statement()
         }
@@ -442,6 +464,34 @@ mod tests {
         let mut parser = Parser::new(tokens);
         let statements = parser.parse()?;
         assert_eq!("(a =  (Number(2.0)))", statements[0].to_string());
+
+        let mut scanner = Scanner::new(
+            r#"
+            // Scopes
+            var outer = "outer variable";
+            print outer; 
+            {
+                outer = "now inner";
+                print outer;
+                var inner = "new inner";
+                print inner;
+            }
+            print outer;
+            print inner;
+        "#
+            .into(),
+        );
+        let tokens = scanner.scan_tokens()?;
+        let mut parser = Parser::new(tokens);
+        let statements = parser.parse()?;
+        assert_eq!(
+            "Var outer = Some(Literal(Some(String(\"outer variable\")))), Print (Var outer), Block [(outer =  (String(\"now inner\"))), Print (Var outer), Var inner = Some(Literal(Some(String(\"new inner\")))), Print (Var inner)], Print (Var outer), Print (Var inner)",
+            statements
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<String>>()
+                .join(", ")
+        );
         Ok(())
     }
 }
