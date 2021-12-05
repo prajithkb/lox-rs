@@ -14,6 +14,7 @@ pub enum Expr {
     Unary(Token, Box<Expr>),
     Var(Token),
     Assign(Token, Box<Expr>),
+    Logical(Box<Expr>, Token, Box<Expr>),
 }
 
 impl Display for Expr {
@@ -29,6 +30,8 @@ pub enum Stmt {
     Print(Box<Expr>),
     Var(Token, Option<Box<Expr>>),
     Block(Vec<Stmt>),
+    If(Box<Expr>, Box<Stmt>, Option<Box<Stmt>>),
+    While(Box<Expr>, Box<Stmt>),
 }
 
 impl Display for Stmt {
@@ -52,6 +55,7 @@ fn to_string_expr(expr: &Expr) -> String {
         Expr::Unary(operator, expr) => parenthesize(&operator.lexeme, &[expr]),
         Expr::Var(token) => parenthesize(&format!("Var {}", &token.lexeme), &[]),
         Expr::Assign(token, expr) => parenthesize(&format!("{} = ", &token.lexeme), &[expr]),
+        Expr::Logical(left, operator, right) => parenthesize(&operator.lexeme, &[left, right]),
     }
 }
 
@@ -68,6 +72,11 @@ fn to_string_stmt(stmt: &Stmt) -> String {
                 .collect::<Vec<String>>()
                 .join(", "),
         ),
+        Stmt::If(condition, if_branch, else_branch) => format!(
+            "If <{}> [{}] else [{:?}]",
+            condition, if_branch, else_branch
+        ),
+        Stmt::While(condition, body) => format!("While <{}> [{}] ", condition, body),
     }
 }
 
@@ -90,15 +99,19 @@ fn parse_error(token: &Token, message: &str) -> ErrorKind {
     ))
 }
 
-///  Grammer from https://craftinginterpreters.com/parsing-expressions.html
+///  Grammer from https://craftinginterpreters.com
 /// ```txt
 /// program        → declaration* EOF ;
 /// declaration    → varDecl | statement ;
 /// varDecl        → "var" IDENTIFIER ( "=" expression )? ";"
-/// statement      → exprStmt | printStmt | block ;
+/// statement      → exprStmt | printStmt | block  | ifStmt | WhileStmt;
+/// whileStmt      → "while" "(" expression ")" statement ;      
+/// ifStmt         → "if" "(" expression ")" statement ( "else" statement )? ;
 /// block          → "{" declaration* "}" ;
 /// expression     → assignment ;
-/// assignment     → IDENTIFIER "=" assignment | equality ;
+/// assignment     → IDENTIFIER "=" assignment | logic_or ;
+/// logic_or       → logic_and ( "or" logic_and )* ;
+/// logic_and      → equality ( "and" equality )* ;
 /// printStmt      → "print" expression ";" ;
 /// expression     → equality ;
 /// equality       → comparison ( ( "!=" | "==" ) comparison )* ;
@@ -166,9 +179,80 @@ impl<'a> Parser<'a> {
             self.print_statement()
         } else if self.match_and_advance(&[TokenType::LeftBrace]) {
             self.block()
+        } else if self.match_and_advance(&[TokenType::If]) {
+            self.if_statement()
+        } else if self.match_and_advance(&[TokenType::While]) {
+            self.while_statement()
+        } else if self.match_and_advance(&[TokenType::For]) {
+            self.for_statement()
         } else {
             self.expression_statement()
         }
+    }
+    /// for(Option<Initializer>; Option<Condition>; Option<Increment>) { Statement }
+    /// Desugaring example
+    fn for_statement(&mut self) -> Result<Stmt> {
+        self.consume_next_token(TokenType::LeftParen, "Expect '(' after for")?;
+        let mut initializer = None;
+        if self.peek_token().token_type != TokenType::Semicolon {
+            if self.match_and_advance(&[TokenType::Var]) {
+                initializer = Some(self.var_declaration_statement()?);
+            } else {
+                initializer = Some(self.expression_statement()?);
+            }
+        }
+        let mut condition = None;
+        if self.peek_token().token_type != TokenType::Semicolon {
+            condition = Some(self.expression()?);
+        }
+        self.consume_next_token(TokenType::Semicolon, "Expect ';' after for condition")?;
+        let mut increment = None;
+        if self.peek_token().token_type != TokenType::RightParen {
+            increment = Some(self.expression()?);
+        }
+        self.consume_next_token(TokenType::RightParen, "Expect ')' after for increment")?;
+        let mut body = self.statement()?;
+
+        if let Some(increment) = increment {
+            body = Stmt::Block(vec![body, Stmt::Expression(Box::new(increment))])
+        }
+        match condition {
+            Some(condition) => body = Stmt::While(Box::new(condition), Box::new(body)),
+            None => {
+                body = Stmt::While(
+                    Box::new(Expr::Literal(Literal::opt_bool(true))),
+                    Box::new(body),
+                )
+            }
+        }
+        match initializer {
+            Some(initializer) => Ok(Stmt::Block(vec![initializer, body])),
+            None => Ok(body),
+        }
+    }
+
+    fn while_statement(&mut self) -> Result<Stmt> {
+        self.consume_next_token(TokenType::LeftParen, "Expect '(' after while")?;
+        let condition = self.expression()?;
+        self.consume_next_token(TokenType::RightParen, "Expect ')' after while condition")?;
+        let body = self.statement()?;
+        Ok(Stmt::While(Box::new(condition), Box::new(body)))
+    }
+
+    fn if_statement(&mut self) -> Result<Stmt> {
+        self.consume_next_token(TokenType::LeftParen, "Expect '(' after if")?;
+        let condition = self.expression()?;
+        self.consume_next_token(TokenType::RightParen, "Expect ')' after if condition")?;
+        let if_branch = self.statement()?;
+        let mut else_branch = None;
+        if self.match_and_advance(&[TokenType::Else]) {
+            else_branch = Some(Box::new(self.statement()?));
+        }
+        Ok(Stmt::If(
+            Box::new(condition),
+            Box::new(if_branch),
+            else_branch,
+        ))
     }
 
     fn print_statement(&mut self) -> Result<Stmt> {
@@ -206,7 +290,7 @@ impl<'a> Parser<'a> {
     }
 
     fn assignment(&mut self) -> Result<Expr> {
-        let expr = self.equality()?;
+        let expr = self.logic_or()?;
         if self.match_and_advance(&[TokenType::Equal]) {
             let equals = self.previous();
             let value = self.assignment()?;
@@ -216,6 +300,28 @@ impl<'a> Parser<'a> {
             bail!(parse_error(&equals, "Invalid assignment target"))
         }
         Ok(expr)
+    }
+
+    fn logic_or(&mut self) -> Result<Expr> {
+        let left = self.logic_and()?;
+        if self.match_and_advance(&[TokenType::OR]) {
+            let operator = self.previous();
+            let right = self.logic_and()?;
+            Ok(Expr::Logical(Box::new(left), operator, Box::new(right)))
+        } else {
+            Ok(left)
+        }
+    }
+
+    fn logic_and(&mut self) -> Result<Expr> {
+        let left = self.equality()?;
+        if self.match_and_advance(&[TokenType::And]) {
+            let operator = self.previous();
+            let right = self.equality()?;
+            Ok(Expr::Logical(Box::new(left), operator, Box::new(right)))
+        } else {
+            Ok(left)
+        }
     }
 
     fn equality(&mut self) -> Result<Expr> {
@@ -492,6 +598,127 @@ mod tests {
                 .collect::<Vec<String>>()
                 .join(", ")
         );
+
+        let mut scanner = Scanner::new(
+            r#"
+            // Scopes
+            var a = 2;
+            if (a == 2 ) {
+                print "if";
+            } else {
+                print "else";
+            }
+        "#
+            .into(),
+        );
+        let tokens = scanner.scan_tokens()?;
+        let mut parser = Parser::new(tokens);
+        let statements = parser.parse()?;
+        assert_eq!(
+            "Var a = Some(Literal(Some(Number(2.0)))), If <(== (Var a) (Number(2.0)))> [Block [Print (String(\"if\"))]] else [Some(Block([Print(Literal(Some(String(\"else\"))))]))]",
+            statements
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<String>>()
+                .join(", ")
+        );
+
+        let mut scanner = Scanner::new(
+            r#"
+            // Scopes
+            var a = 2;
+            var b = 3;
+            if (a == 2 or b== 3) {
+                print "one";
+            }  else {
+                print "";
+            }
+            if (a == 3 or b ==3){
+                print "two";
+            } else {
+                print "";
+            }
+
+            if (a == 3 and b ==3){
+                print "";
+            } else {
+                print "three";
+            }
+
+            if (a == 2 and b ==3){
+                print "four";
+            } else {
+                print "";
+            }
+        "#
+            .into(),
+        );
+        let tokens = scanner.scan_tokens()?;
+        let mut parser = Parser::new(tokens);
+        let statements = parser.parse()?;
+        assert_eq!(
+            "Var a = Some(Literal(Some(Number(2.0)))), Var b = Some(Literal(Some(Number(3.0)))), If <(or (== (Var a) (Number(2.0))) (== (Var b) (Number(3.0))))> [Block [Print (String(\"one\"))]] else [Some(Block([Print(Literal(Some(String(\"\"))))]))], If <(or (== (Var a) (Number(3.0))) (== (Var b) (Number(3.0))))> [Block [Print (String(\"two\"))]] else [Some(Block([Print(Literal(Some(String(\"\"))))]))], If <(and (== (Var a) (Number(3.0))) (== (Var b) (Number(3.0))))> [Block [Print (String(\"\"))]] else [Some(Block([Print(Literal(Some(String(\"three\"))))]))], If <(and (== (Var a) (Number(2.0))) (== (Var b) (Number(3.0))))> [Block [Print (String(\"four\"))]] else [Some(Block([Print(Literal(Some(String(\"\"))))]))]",
+            statements
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<String>>()
+                .join(", ")
+        );
+
+        let mut scanner = Scanner::new("a = 2;".into());
+        let tokens = scanner.scan_tokens()?;
+        let mut parser = Parser::new(tokens);
+        let statements = parser.parse()?;
+        assert_eq!("(a =  (Number(2.0)))", statements[0].to_string());
+
+        let mut scanner = Scanner::new(
+            r#"
+            // Scopes
+            var a = 1;
+            while (a < 10) {
+                print a;
+                a = a +1;
+            }
+        "#
+            .into(),
+        );
+        let tokens = scanner.scan_tokens()?;
+        let mut parser = Parser::new(tokens);
+        let statements = parser.parse()?;
+        assert_eq!(
+            "Var a = Some(Literal(Some(Number(1.0)))), While <(< (Var a) (Number(10.0)))> [Block [Print (Var a), (a =  (+ (Var a) (Number(1.0))))]] ",
+            statements
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<String>>()
+                .join(", ")
+        );
+
+        let mut scanner = Scanner::new(
+            r#"
+            // Scopes
+            var a = 0;
+            var temp;
+            for (var b = 1; a < 10000; b = temp + b) {
+              print a;
+              temp = a;
+              a = b;
+            }
+        "#
+            .into(),
+        );
+        let tokens = scanner.scan_tokens()?;
+        let mut parser = Parser::new(tokens);
+        let statements = parser.parse()?;
+        assert_eq!(
+            "Var a = Some(Literal(Some(Number(0.0)))), Var temp = None, Block [Var b = Some(Literal(Some(Number(1.0)))), While <(< (Var a) (Number(10000.0)))> [Block [Block [Print (Var a), (temp =  (Var a)), (a =  (Var b))], (b =  (+ (Var temp) (Var b)))]] ]",
+            statements
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<String>>()
+                .join(", ")
+        );
+
         Ok(())
     }
 }

@@ -111,6 +111,10 @@ impl<'a> Interpreter<'a> {
             Stmt::Print(e) => self.print_statement(e),
             Stmt::Var(token, expr) => self.var_statement(token, expr),
             Stmt::Block(statements) => self.block(statements),
+            Stmt::If(condition, if_branch, else_branch) => {
+                self.if_statement(condition, if_branch, else_branch)
+            }
+            Stmt::While(condition, body) => self.while_statement(condition, body),
         }
     }
 
@@ -145,6 +149,45 @@ impl<'a> Interpreter<'a> {
         Ok(())
     }
 
+    fn if_statement(
+        &mut self,
+        condition: &Expr,
+        if_branch: &Stmt,
+        else_branch: &Option<Box<Stmt>>,
+    ) -> Result<()> {
+        let condition_str = condition.to_string();
+        if let Value::Boolean(is_true) = self.evaluate(condition)? {
+            if is_true {
+                return self.execute(if_branch);
+            } else if let Some(else_branch) = else_branch {
+                return self.execute(else_branch);
+            }
+        }
+        bail!(runtime_error(format!(
+            "Condition {} does not evaluate to a boolean",
+            condition_str
+        )))
+    }
+
+    fn while_statement(&mut self, condition: &Expr, body: &Stmt) -> Result<()> {
+        let condition_str = condition.to_string();
+        loop {
+            if let Value::Boolean(result) = self.evaluate(condition)? {
+                if result {
+                    self.execute(body)?;
+                } else {
+                    break;
+                }
+            } else {
+                bail!(runtime_error(format!(
+                    "Condition {} does not evaluate to a boolean",
+                    condition_str
+                )))
+            }
+        }
+        Ok(())
+    }
+
     fn evaluate(&mut self, expr: &Expr) -> Result<Value> {
         match expr {
             Expr::Binary(left, operator, right) => self.evaluate_binary(left, operator, right),
@@ -153,6 +196,7 @@ impl<'a> Interpreter<'a> {
             Expr::Unary(operator, right) => self.evaluate_unary(operator, right),
             Expr::Var(name) => self.evaluate_var(name),
             Expr::Assign(name, expr) => self.evaluate_assignment(name, expr),
+            Expr::Logical(left, operator, right) => self.evaluate_logical(left, operator, right),
         }
     }
 
@@ -222,6 +266,37 @@ impl<'a> Interpreter<'a> {
             TokenType::Minus => negate_value(right, operator),
             TokenType::Bang => bang_value(right),
             _ => bail!(runtime_error("Unreachable code".into())),
+        }
+    }
+
+    fn evaluate_logical(&mut self, left: &Expr, operator: &Token, right: &Expr) -> Result<Value> {
+        if operator.token_type == TokenType::OR {
+            if let Value::Boolean(result) = self.evaluate(left)? {
+                if result {
+                    return Ok(Value::Boolean(result));
+                } else if let Value::Boolean(result) = self.evaluate(right)? {
+                    return Ok(Value::Boolean(result));
+                }
+            }
+            bail!(runtime_error_with_token(
+                format!("Expression {} does not evaluate to a boolean", left),
+                operator
+            ))
+        } else if operator.token_type == TokenType::And {
+            if let (Value::Boolean(l), Value::Boolean(r)) =
+                (self.evaluate(left)?, self.evaluate(right)?)
+            {
+                return Ok(Value::Boolean(l && r));
+            }
+            bail!(runtime_error_with_token(
+                format!("Expression {} does not evaluate to a boolean", left),
+                operator
+            ))
+        } else {
+            bail!(runtime_error_with_token(
+                format!("Invalid logical operator {}", operator.lexeme),
+                operator
+            ))
         }
     }
 }
@@ -574,10 +649,131 @@ outer variable set to inner variable
                 e.to_string()
             ),
         }
-        // assert_eq!(
-        //     Err(ErrorKind::RuntimeError("".into())),
-        //     interpreter.interpret(&statements),
-        // );
+        assert_eq!(expected, utf8_to_string(&buf));
+        Ok(())
+    }
+
+    #[test]
+    fn if_statements() -> Result<()> {
+        let mut scanner = Scanner::new(
+            r#"
+            // Scopes
+            var a = 2;
+            if (a == 2 ) {
+                print "if";
+                var b = 2;
+            } else {
+                print "else";
+            }
+
+            if (a ==3) {
+                print "second if";
+            } else {
+                print "second else";
+            }
+        "#
+            .into(),
+        );
+        let tokens = scanner.scan_tokens()?;
+        let mut parser = Parser::new(tokens);
+        let statements = parser.parse()?;
+        let mut buf = vec![];
+        let mut interpreter = Interpreter::new_with_writer(&mut buf);
+        let expected = "if\nsecond else\n".to_string();
+        interpreter.interpret(&statements)?;
+        assert_eq!(expected, utf8_to_string(&buf));
+        Ok(())
+    }
+
+    #[test]
+    fn logical_expressions() -> Result<()> {
+        let mut scanner = Scanner::new(
+            r#"
+            // Scopes
+            var a = 2;
+            var b = 3;
+            if (a == 2 or b== 3) {
+                print "one";
+            }  else {
+                print "fail";
+            }
+            if (a == 3 or b ==3){
+                print "two";
+            } else {
+                print "fail";
+            }
+
+            if (a == 3 and b ==3){
+                print "fail";
+            } else {
+                print "three";
+            }
+
+            if (a == 2 and b ==3){
+                print "four";
+            } else {
+                print "fail";
+            }
+        "#
+            .into(),
+        );
+        let tokens = scanner.scan_tokens()?;
+        let mut parser = Parser::new(tokens);
+        let statements = parser.parse()?;
+        let mut buf = vec![];
+        let mut interpreter = Interpreter::new_with_writer(&mut buf);
+        let expected = "one\ntwo\nthree\nfour\n".to_string();
+        interpreter.interpret(&statements)?;
+        assert_eq!(expected, utf8_to_string(&buf));
+        Ok(())
+    }
+
+    #[test]
+    fn while_statement() -> Result<()> {
+        let mut scanner = Scanner::new(
+            r#"
+            // Scopes
+            var a = 1;
+            while (a <= 4) {
+                print a;
+                a = a +1;
+            }
+        "#
+            .into(),
+        );
+        let tokens = scanner.scan_tokens()?;
+        let mut parser = Parser::new(tokens);
+        let statements = parser.parse()?;
+        let mut buf = vec![];
+        let mut interpreter = Interpreter::new_with_writer(&mut buf);
+        let expected = "1\n2\n3\n4\n".to_string();
+        interpreter.interpret(&statements)?;
+        assert_eq!(expected, utf8_to_string(&buf));
+        Ok(())
+    }
+
+    #[test]
+    fn for_statement() -> Result<()> {
+        let mut scanner = Scanner::new(
+            r#"
+            // Scopes
+            var a = 0;
+            var temp;
+            for (var b = 1; a < 100; b = temp + b) {
+              print a;
+              temp = a;
+              a = b;
+            }
+        "#
+            .into(),
+        );
+        let tokens = scanner.scan_tokens()?;
+        let mut parser = Parser::new(tokens);
+        let statements = parser.parse()?;
+        let mut buf = vec![];
+        let mut interpreter = Interpreter::new_with_writer(&mut buf);
+        let expected = "0\n1\n1\n2\n3\n5\n8\n13\n21\n34\n55\n89\n".to_string();
+        interpreter.interpret(&statements)?;
         assert_eq!(expected, utf8_to_string(&buf));
         Ok(())
     }
