@@ -524,7 +524,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_ast_correctly() -> Result<()> {
+    fn parses_ast_correctly_expressions() -> Result<()> {
         let mut scanner = Scanner::new("-4;".into());
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
@@ -571,6 +571,11 @@ mod tests {
         let statements = parser.parse()?;
         assert_eq!("(a =  (Number(2.0)))", statements[0].to_string());
 
+        Ok(())
+    }
+
+    #[test]
+    fn parses_ast_correctly_block() -> Result<()> {
         let mut scanner = Scanner::new(
             r#"
             // Scopes
@@ -598,31 +603,10 @@ mod tests {
                 .collect::<Vec<String>>()
                 .join(", ")
         );
-
-        let mut scanner = Scanner::new(
-            r#"
-            // Scopes
-            var a = 2;
-            if (a == 2 ) {
-                print "if";
-            } else {
-                print "else";
-            }
-        "#
-            .into(),
-        );
-        let tokens = scanner.scan_tokens()?;
-        let mut parser = Parser::new(tokens);
-        let statements = parser.parse()?;
-        assert_eq!(
-            "Var a = Some(Literal(Some(Number(2.0)))), If <(== (Var a) (Number(2.0)))> [Block [Print (String(\"if\"))]] else [Some(Block([Print(Literal(Some(String(\"else\"))))]))]",
-            statements
-                .into_iter()
-                .map(|s| s.to_string())
-                .collect::<Vec<String>>()
-                .join(", ")
-        );
-
+        Ok(())
+    }
+    #[test]
+    fn parses_ast_correctly_if() -> Result<()> {
         let mut scanner = Scanner::new(
             r#"
             // Scopes
@@ -671,6 +655,10 @@ mod tests {
         let statements = parser.parse()?;
         assert_eq!("(a =  (Number(2.0)))", statements[0].to_string());
 
+        Ok(())
+    }
+    #[test]
+    fn parses_ast_correctly_loop() -> Result<()> {
         let mut scanner = Scanner::new(
             r#"
             // Scopes
