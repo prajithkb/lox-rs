@@ -1,41 +1,81 @@
+use std::cell::{RefCell, RefMut};
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::fmt::Display;
+use std::fmt::{Debug, Display};
 use std::io::Write;
+use std::rc::Rc;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::parser::{Expr, Stmt};
 
 use crate::errors::*;
 use crate::tokens::{Literal, Token, TokenType};
 
-#[derive(Debug, PartialEq, Clone)]
+type Mutable<T> = Rc<RefCell<T>>;
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Value {
-    _Any(Box<Value>),
     Nil,
     Boolean(bool),
     Number(f64),
     String(String),
+    Function(LoxFunction),
+    __Return(Box<Value>),
 }
 
 impl Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Value::_Any(_) => todo!(),
             Value::Nil => f.write_str("nil"),
             Value::Boolean(b) => f.write_str(&b.to_string()),
             Value::Number(n) => f.write_str(&n.to_string()),
             Value::String(s) => f.write_str(s),
+            Value::Function(callable) => f.write_fmt(format_args!("fn {:?}", callable)),
+            Value::__Return(v) => f.write_fmt(format_args!("Return {:?}", v)),
         }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum LoxFunction {
+    Native(String, Vec<String>, Mutable<NativeFunction>),
+    UserDefined(String, Vec<String>, Rc<Vec<Stmt>>),
+}
+
+type InnerNativeFunction = Box<dyn FnMut(Vec<Value>, Mutable<Environment>) -> Value>;
+
+pub struct NativeFunction {
+    name: String,
+    inner: InnerNativeFunction,
+}
+
+impl NativeFunction {
+    fn new(name: String, inner: InnerNativeFunction) -> Self {
+        NativeFunction { name, inner }
+    }
+}
+
+impl PartialEq for NativeFunction {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+    }
+}
+
+impl Debug for NativeFunction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeFunction")
+            .field("name", &self.name)
+            .finish()
     }
 }
 
 struct Environment {
     values: HashMap<String, Value>,
-    enclosing: Option<Box<Environment>>,
+    enclosing: Option<Mutable<Environment>>,
 }
 
 impl Environment {
-    pub fn new(enclosing: Option<Box<Environment>>) -> Self {
+    pub fn new(enclosing: Option<Mutable<Environment>>) -> Self {
         Environment {
             values: HashMap::new(),
             enclosing,
@@ -53,8 +93,9 @@ impl Environment {
                 Some(previous_value)
             }
             Entry::Vacant(_) => {
-                if let Some(e) = &mut self.enclosing {
-                    e.assign(name, value)
+                if let Some(e) = self.enclosing.as_mut() {
+                    let v = &**e;
+                    v.borrow_mut().assign(name, value)
                 } else {
                     None
                 }
@@ -66,7 +107,7 @@ impl Environment {
         match self.values.get(name) {
             Some(v) => Some(v.clone()),
             None => match &self.enclosing {
-                Some(e) => e.get(name),
+                Some(e) => e.borrow().get(name),
                 None => None,
             },
         }
@@ -74,28 +115,51 @@ impl Environment {
 }
 
 pub struct Interpreter<'a> {
-    environment: Option<Box<Environment>>,
+    globals: Mutable<Environment>,
+    environment: Mutable<Environment>,
     output_writer: Option<&'a mut dyn Write>,
 }
 
 impl<'a> Interpreter<'a> {
     pub fn new() -> Self {
-        Interpreter {
-            environment: Some(Box::new(Environment::new(None))),
-            output_writer: None,
-        }
+        Interpreter::new_with_writer(None)
     }
 
-    #[allow(dead_code)]
-    fn new_with_writer(output_writer: &'a mut dyn Write) -> Self {
-        Interpreter {
-            environment: Some(Box::new(Environment::new(None))),
-            output_writer: Some(output_writer),
-        }
+    fn clock() -> InnerNativeFunction {
+        Box::new(|_, _| {
+            let start = SystemTime::now();
+            let since_the_epoch = start
+                .duration_since(UNIX_EPOCH)
+                .expect("Time went backwards")
+                .as_secs_f64();
+            Value::Number(since_the_epoch)
+        })
     }
 
-    fn environment(&mut self) -> &mut Environment {
-        self.environment.as_mut().unwrap()
+    fn new_with_writer(output_writer: Option<&'a mut dyn Write>) -> Self {
+        let globals = Rc::new(RefCell::new(Environment::new(None)));
+        let environment = globals.clone();
+        let mut interpreter = Interpreter {
+            globals,
+            environment,
+            output_writer,
+        };
+        interpreter.environment().define(
+            "clock".into(),
+            Value::Function(LoxFunction::Native(
+                "clock".into(),
+                vec![],
+                Rc::new(RefCell::new(NativeFunction::new(
+                    "clock".into(),
+                    Interpreter::clock(),
+                ))),
+            )),
+        );
+        interpreter
+    }
+
+    fn environment(&mut self) -> RefMut<Environment> {
+        (*self.environment).borrow_mut()
     }
 
     pub fn interpret(&mut self, statements: &[Stmt]) -> Result<()> {
@@ -105,17 +169,49 @@ impl<'a> Interpreter<'a> {
         Ok(())
     }
 
-    fn execute(&mut self, statement: &Stmt) -> Result<()> {
+    fn execute(&mut self, statement: &Stmt) -> Result<Value> {
         match statement {
-            Stmt::Expression(e) => self.evaluate(e).map(|_| Ok(()))?,
-            Stmt::Print(e) => self.print_statement(e),
-            Stmt::Var(token, expr) => self.var_statement(token, expr),
+            Stmt::Expression(e) => self.evaluate(e).map(|_| Ok(Value::Nil))?,
+            Stmt::Print(e) => self.print_statement(e).map(|_| Ok(Value::Nil))?,
+            Stmt::Var(token, expr) => self.var_statement(token, expr).map(|_| Ok(Value::Nil))?,
             Stmt::Block(statements) => self.block(statements),
             Stmt::If(condition, if_branch, else_branch) => {
                 self.if_statement(condition, if_branch, else_branch)
             }
-            Stmt::While(condition, body) => self.while_statement(condition, body),
+            Stmt::While(condition, body) => self
+                .while_statement(condition, body)
+                .map(|_| Ok(Value::Nil))?,
+            Stmt::Function(name, parameters, body) => self
+                .function_declaration(name, parameters, body.clone())
+                .map(|_| Ok(Value::Nil))?,
+            Stmt::Return(_, expr) => self.return_statement(expr),
         }
+    }
+
+    fn return_statement(&mut self, expr: &Option<Box<Expr>>) -> Result<Value> {
+        match expr {
+            Some(expr) => Ok(Value::__Return(Box::new(self.evaluate(expr)?))),
+            None => Ok(Value::Nil),
+        }
+    }
+
+    fn function_declaration(
+        &mut self,
+        name: &Token,
+        parameters: &[Token],
+        body: Rc<Vec<Stmt>>,
+    ) -> Result<()> {
+        let function_name = name.lexeme.clone();
+        let parameter_names: Vec<String> = parameters.iter().map(|p| p.lexeme.clone()).collect();
+        self.environment().define(
+            function_name,
+            Value::Function(LoxFunction::UserDefined(
+                name.lexeme.clone(),
+                parameter_names,
+                body,
+            )),
+        );
+        Ok(())
     }
 
     fn print_statement(&mut self, expr: &Expr) -> Result<()> {
@@ -137,16 +233,34 @@ impl<'a> Interpreter<'a> {
         Ok(())
     }
 
-    fn block(&mut self, statements: &[Stmt]) -> Result<()> {
-        self.environment = Some(Box::new(Environment::new(self.environment.take())));
+    fn block(&mut self, statements: &[Stmt]) -> Result<Value> {
+        self.block_with_env(
+            statements,
+            Rc::new(RefCell::new(Environment::new(Some(
+                self.environment.clone(),
+            )))),
+        )
+    }
+
+    fn block_with_env(
+        &mut self,
+        statements: &[Stmt],
+        environment: Mutable<Environment>,
+    ) -> Result<Value> {
+        let previous = self.environment.clone();
+        self.environment = environment;
+        let mut value = Value::Nil;
         for statement in statements {
-            self.execute(statement).map_err(|e| {
-                self.environment = self.environment().enclosing.take();
+            if let Value::__Return(v) = self.execute(statement).map_err(|e| {
+                self.environment = previous.clone();
                 e
-            })?;
+            })? {
+                value = Value::__Return(v);
+                break;
+            }
         }
-        self.environment = self.environment().enclosing.take();
-        Ok(())
+        self.environment = previous;
+        Ok(value)
     }
 
     fn if_statement(
@@ -154,17 +268,20 @@ impl<'a> Interpreter<'a> {
         condition: &Expr,
         if_branch: &Stmt,
         else_branch: &Option<Box<Stmt>>,
-    ) -> Result<()> {
+    ) -> Result<Value> {
         let condition_str = condition.to_string();
-        if let Value::Boolean(is_true) = self.evaluate(condition)? {
+        let evaluated_condition = self.evaluate(condition);
+        if let Value::Boolean(is_true) = evaluated_condition? {
             if is_true {
                 return self.execute(if_branch);
             } else if let Some(else_branch) = else_branch {
                 return self.execute(else_branch);
+            } else {
+                return Ok(Value::Nil);
             }
         }
         bail!(runtime_error(format!(
-            "Condition {} does not evaluate to a boolean",
+            "Condition {} did not evaluate to a boolean",
             condition_str
         )))
     }
@@ -197,6 +314,7 @@ impl<'a> Interpreter<'a> {
             Expr::Var(name) => self.evaluate_var(name),
             Expr::Assign(name, expr) => self.evaluate_assignment(name, expr),
             Expr::Logical(left, operator, right) => self.evaluate_logical(left, operator, right),
+            Expr::Call(expr, call_paren, arguments) => self.call(expr, call_paren, arguments),
         }
     }
 
@@ -296,6 +414,76 @@ impl<'a> Interpreter<'a> {
             bail!(runtime_error_with_token(
                 format!("Invalid logical operator {}", operator.lexeme),
                 operator
+            ))
+        }
+    }
+
+    fn call(&mut self, expr: &Expr, left_paren: &Token, arguments: &[Expr]) -> Result<Value> {
+        if let Value::Function(lox_function) = self.evaluate(expr)? {
+            match lox_function {
+                LoxFunction::UserDefined(name, parameters, body) => {
+                    if parameters.len() != arguments.len() {
+                        bail!(runtime_error_with_token(
+                            format!(
+                                "function {} expects {} arguments but got {}",
+                                name,
+                                parameters.len(),
+                                arguments.len()
+                            ),
+                            left_paren
+                        ))
+                    }
+                    let mut evaluated_arguments = vec![];
+                    for argument in arguments {
+                        let evaluated_argument = self.evaluate(argument)?;
+                        evaluated_arguments.push(evaluated_argument);
+                    }
+                    let function_env =
+                        Rc::new(RefCell::new(Environment::new(Some(self.globals.clone()))));
+                    for (i, arg) in evaluated_arguments.into_iter().enumerate() {
+                        let mut e = (*function_env).borrow_mut();
+                        e.define(parameters[i].clone(), arg);
+                    }
+                    if let Value::__Return(v) = self.block_with_env(body.as_ref(), function_env)? {
+                        Ok(*v)
+                    } else {
+                        bail!(runtime_error_with_token(
+                            "Internal error, invalid return from function call".to_string(),
+                            left_paren
+                        ))
+                    }
+                }
+                LoxFunction::Native(name, parameters, native_function) => {
+                    if parameters.len() != arguments.len() {
+                        bail!(runtime_error_with_token(
+                            format!(
+                                "function {} expects {} arguments but got {}",
+                                name,
+                                parameters.len(),
+                                arguments.len()
+                            ),
+                            left_paren
+                        ))
+                    }
+                    let mut evaluated_arguments = vec![];
+                    for argument in arguments {
+                        let evaluated_argument = self.evaluate(argument)?;
+                        evaluated_arguments.push(evaluated_argument);
+                    }
+                    let function_env =
+                        Rc::new(RefCell::new(Environment::new(Some(self.globals.clone()))));
+                    for (i, arg) in evaluated_arguments.clone().into_iter().enumerate() {
+                        let mut e = (*function_env).borrow_mut();
+                        e.define(parameters[i].clone(), arg);
+                    }
+                    let native_call = &mut (*native_function).borrow_mut().inner;
+                    Ok(native_call(evaluated_arguments, function_env))
+                }
+            }
+        } else {
+            bail!(runtime_error_with_token(
+                "Can only call functions and classes.".into(),
+                left_paren
             ))
         }
     }
@@ -440,7 +628,7 @@ mod tests {
         parser::{Parser, Stmt},
         scanner::Scanner,
     };
-    use std::f64::EPSILON;
+    use std::{cell::RefCell, f64::EPSILON, rc::Rc};
 
     use super::{Environment, Interpreter};
 
@@ -589,7 +777,7 @@ mod tests {
         let mut parser = Parser::new(tokens);
         let statements = parser.parse()?;
         let mut buf = vec![];
-        let mut interpreter = Interpreter::new_with_writer(&mut buf);
+        let mut interpreter = Interpreter::new_with_writer(Some(&mut buf));
         let expected = "hello world!\n".to_string();
         interpreter.interpret(&statements)?;
         assert_eq!(expected, utf8_to_string(&buf));
@@ -606,7 +794,7 @@ mod tests {
         let mut parser = Parser::new(tokens);
         let statements = parser.parse()?;
         let mut buf = vec![];
-        let mut interpreter = Interpreter::new_with_writer(&mut buf);
+        let mut interpreter = Interpreter::new_with_writer(Some(&mut buf));
         let expected = "true\n".to_string();
         interpreter.interpret(&statements)?;
         assert_eq!(expected, utf8_to_string(&buf));
@@ -635,7 +823,7 @@ mod tests {
         let mut parser = Parser::new(tokens);
         let statements = parser.parse()?;
         let mut buf = vec![];
-        let mut interpreter = Interpreter::new_with_writer(&mut buf);
+        let mut interpreter = Interpreter::new_with_writer(Some(&mut buf));
         let expected = r#"outer variable
 outer variable set to inner variable
 created a new inner variable
@@ -678,7 +866,7 @@ outer variable set to inner variable
         let mut parser = Parser::new(tokens);
         let statements = parser.parse()?;
         let mut buf = vec![];
-        let mut interpreter = Interpreter::new_with_writer(&mut buf);
+        let mut interpreter = Interpreter::new_with_writer(Some(&mut buf));
         let expected = "if\nsecond else\n".to_string();
         interpreter.interpret(&statements)?;
         assert_eq!(expected, utf8_to_string(&buf));
@@ -721,7 +909,7 @@ outer variable set to inner variable
         let mut parser = Parser::new(tokens);
         let statements = parser.parse()?;
         let mut buf = vec![];
-        let mut interpreter = Interpreter::new_with_writer(&mut buf);
+        let mut interpreter = Interpreter::new_with_writer(Some(&mut buf));
         let expected = "one\ntwo\nthree\nfour\n".to_string();
         interpreter.interpret(&statements)?;
         assert_eq!(expected, utf8_to_string(&buf));
@@ -745,7 +933,7 @@ outer variable set to inner variable
         let mut parser = Parser::new(tokens);
         let statements = parser.parse()?;
         let mut buf = vec![];
-        let mut interpreter = Interpreter::new_with_writer(&mut buf);
+        let mut interpreter = Interpreter::new_with_writer(Some(&mut buf));
         let expected = "1\n2\n3\n4\n".to_string();
         interpreter.interpret(&statements)?;
         assert_eq!(expected, utf8_to_string(&buf));
@@ -771,10 +959,58 @@ outer variable set to inner variable
         let mut parser = Parser::new(tokens);
         let statements = parser.parse()?;
         let mut buf = vec![];
-        let mut interpreter = Interpreter::new_with_writer(&mut buf);
+        let mut interpreter = Interpreter::new_with_writer(Some(&mut buf));
         let expected = "0\n1\n1\n2\n3\n5\n8\n13\n21\n34\n55\n89\n".to_string();
         interpreter.interpret(&statements)?;
         assert_eq!(expected, utf8_to_string(&buf));
+        Ok(())
+    }
+
+    #[test]
+    fn native_function_clock() -> Result<()> {
+        let mut scanner = Scanner::new(
+            r#"
+            // Scopes
+            print clock();
+        "#
+            .into(),
+        );
+        let tokens = scanner.scan_tokens()?;
+        let mut parser = Parser::new(tokens);
+        let statements = parser.parse()?;
+        let mut buf = vec![];
+        let mut interpreter = Interpreter::new_with_writer(Some(&mut buf));
+        interpreter.interpret(&statements)?;
+        let output = utf8_to_string(&buf);
+        // This will fail if it is not f64
+        let _ = output.trim().parse::<f64>().unwrap();
+        Ok(())
+    }
+
+    #[test]
+    fn user_defined_fun() -> Result<()> {
+        let mut scanner = Scanner::new(
+            r#"
+            // function
+            
+            fun test_function(a, b) {
+                print a + b;
+            }
+            var a = "hello";
+            test_function(a, " world");
+            var b = 4;
+            test_function(1,b);
+        "#
+            .into(),
+        );
+        let tokens = scanner.scan_tokens()?;
+        let mut parser = Parser::new(tokens);
+        let statements = parser.parse()?;
+        let mut buf = vec![];
+        let mut interpreter = Interpreter::new_with_writer(Some(&mut buf));
+        interpreter.interpret(&statements)?;
+        let output = utf8_to_string(&buf);
+        assert_eq!("hello world\n5\n", output);
         Ok(())
     }
 
@@ -795,7 +1031,7 @@ outer variable set to inner variable
             Some(Value::String("outer changed".into())),
             env.get("outer")
         );
-        let mut env = Environment::new(Some(Box::new(env)));
+        let mut env = Environment::new(Some(Rc::new(RefCell::new(env))));
         assert_eq!(
             Some(Value::String("outer changed".into())),
             env.get("outer")
@@ -813,6 +1049,7 @@ outer variable set to inner variable
             env.define("inner".to_string(), Value::String("inner".into()))
         );
         assert_eq!(Some(Value::String("inner".into())), env.get("inner"));
-        assert_eq!(None, env.enclosing.unwrap().get("inner"));
+        let v = env.enclosing.unwrap();
+        assert_eq!(None, v.as_ref().borrow().get("inner"));
     }
 }

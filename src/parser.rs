@@ -1,7 +1,7 @@
 use log::debug;
 
 use crate::{errors::*, lox::report_error, tokens::TokenType};
-use std::{fmt::Display, io::stdout};
+use std::{fmt::Display, io::stdout, rc::Rc};
 
 use crate::tokens::{Literal, Token};
 
@@ -15,6 +15,7 @@ pub enum Expr {
     Var(Token),
     Assign(Token, Box<Expr>),
     Logical(Box<Expr>, Token, Box<Expr>),
+    Call(Box<Expr>, Token, Vec<Expr>),
 }
 
 impl Display for Expr {
@@ -32,6 +33,8 @@ pub enum Stmt {
     Block(Vec<Stmt>),
     If(Box<Expr>, Box<Stmt>, Option<Box<Stmt>>),
     While(Box<Expr>, Box<Stmt>),
+    Function(Token, Vec<Token>, Rc<Vec<Stmt>>),
+    Return(Token, Option<Box<Expr>>),
 }
 
 impl Display for Stmt {
@@ -56,6 +59,9 @@ fn to_string_expr(expr: &Expr) -> String {
         Expr::Var(token) => parenthesize(&format!("Var {}", &token.lexeme), &[]),
         Expr::Assign(token, expr) => parenthesize(&format!("{} = ", &token.lexeme), &[expr]),
         Expr::Logical(left, operator, right) => parenthesize(&operator.lexeme, &[left, right]),
+        Expr::Call(callee, _, arguments) => {
+            parenthesize(&format!("Fun call [{}({:?})]", callee, arguments), &[])
+        }
     }
 }
 
@@ -77,6 +83,13 @@ fn to_string_stmt(stmt: &Stmt) -> String {
             condition, if_branch, else_branch
         ),
         Stmt::While(condition, body) => format!("While <{}> [{}] ", condition, body),
+        Stmt::Function(name, arguments, body) => {
+            format!(
+                "Fun declaration[{}({:?}) [{:?}]]",
+                name.lexeme, arguments, body
+            )
+        }
+        Stmt::Return(_, expr) => format!("Return {:?}", expr),
     }
 }
 
@@ -102,12 +115,17 @@ fn parse_error(token: &Token, message: &str) -> ErrorKind {
 ///  Grammer from https://craftinginterpreters.com
 /// ```txt
 /// program        → declaration* EOF ;
-/// declaration    → varDecl | statement ;
+/// declaration    → funDecl| varDecl | statement ;
 /// varDecl        → "var" IDENTIFIER ( "=" expression )? ";"
-/// statement      → exprStmt | printStmt | block  | ifStmt | WhileStmt;
+/// funDecl        → "fun" function ;
+/// function       → IDENTIFIER "(" parameters? ")" block ;
+/// parameters     → IDENTIFIER ( "," IDENTIFIER )* ;
+/// statement      → exprStmt | printStmt | block  | ifStmt | WhileStmt | returnStmt;
+/// returnStmt     → "return" expression? ";" ;
 /// whileStmt      → "while" "(" expression ")" statement ;      
 /// ifStmt         → "if" "(" expression ")" statement ( "else" statement )? ;
 /// block          → "{" declaration* "}" ;
+/// arguments      → expression ( "," expression )* ;
 /// expression     → assignment ;
 /// assignment     → IDENTIFIER "=" assignment | logic_or ;
 /// logic_or       → logic_and ( "or" logic_and )* ;
@@ -118,8 +136,8 @@ fn parse_error(token: &Token, message: &str) -> ErrorKind {
 /// comparison     → term ( ( ">" | ">=" | "<" | "<=" ) term )* ;
 /// term           → factor ( ( "-" | "+" ) factor )* ;
 /// factor         → unary ( ( "/" | "*" ) unary )* ;
-/// unary          → ( "!" | "-" ) unary
-///                | primary ;
+/// unary          → ( "!" | "-" ) unary | primary ;
+/// call           → primary ( "(" arguments? ")" )* ;
 /// primary        → NUMBER | STRING | "true" | "false" | "nil"
 ///                | "(" expression ")"  | IDENTIFIER;
 ///```
@@ -169,6 +187,8 @@ impl<'a> Parser<'a> {
     fn declaration(&mut self) -> Result<Stmt> {
         if self.match_and_advance(&[TokenType::Var]) {
             self.var_declaration_statement()
+        } else if self.match_and_advance(&[TokenType::Fun]) {
+            self.fun_declaration_statement()
         } else {
             self.statement()
         }
@@ -185,10 +205,23 @@ impl<'a> Parser<'a> {
             self.while_statement()
         } else if self.match_and_advance(&[TokenType::For]) {
             self.for_statement()
+        } else if self.match_and_advance(&[TokenType::Return]) {
+            self.return_statement()
         } else {
             self.expression_statement()
         }
     }
+
+    fn return_statement(&mut self) -> Result<Stmt> {
+        let keyword = self.previous();
+        let mut return_expr = None;
+        if self.peek_token().token_type != TokenType::Semicolon {
+            return_expr = Some(Box::new(self.expression()?));
+        }
+        self.consume_next_token(TokenType::Semicolon, "Expect ';' after return value")?;
+        Ok(Stmt::Return(keyword, return_expr))
+    }
+
     /// for(Option<Initializer>; Option<Condition>; Option<Increment>) { Statement }
     /// Desugaring example
     fn for_statement(&mut self) -> Result<Stmt> {
@@ -274,6 +307,42 @@ impl<'a> Parser<'a> {
                     "Expect ';' after variable declaration",
                 )
                 .map(|_| Ok(Stmt::Var(token, initializer)))?
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    fn fun_declaration_statement(&mut self) -> Result<Stmt> {
+        let mut parameters = vec![];
+        match self.consume_next_token(TokenType::Identifier, "Expect function name") {
+            Ok(token) => {
+                self.consume_next_token(TokenType::LeftParen, "Expect '(' after function name")?;
+                while self.peek_token().token_type != TokenType::RightParen {
+                    let parameter =
+                        self.consume_next_token(TokenType::Identifier, "Expect parameter name")?;
+                    parameters.push(parameter);
+                    if self.peek_token().token_type == TokenType::Comma {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.consume_next_token(
+                    TokenType::RightParen,
+                    "Expect ')' for function declaration",
+                )?;
+                self.consume_next_token(
+                    TokenType::LeftBrace,
+                    "Expect '{' for function declaration",
+                )?;
+                if let Stmt::Block(statements) = self.block()? {
+                    Ok(Stmt::Function(token, parameters, Rc::new(statements)))
+                } else {
+                    bail!(parse_error(
+                        &self.peek_token(),
+                        "Expect a block (starting with '{') for a function declaration"
+                    ))
+                }
             }
             Err(e) => Err(e),
         }
@@ -375,7 +444,30 @@ impl<'a> Parser<'a> {
             let right = self.unary()?;
             return Ok(Expr::Unary(token, Box::new(right)));
         }
-        self.primary()
+        self.call()
+    }
+
+    fn call(&mut self) -> Result<Expr> {
+        let expr = self.primary()?;
+        let mut arguments = vec![];
+        if self.match_and_advance(&[TokenType::LeftParen]) {
+            loop {
+                if self.peek_token().token_type != TokenType::RightParen {
+                    let argument = self.expression()?;
+                    arguments.push(argument);
+                }
+                if !self.match_and_advance(&[TokenType::Comma]) {
+                    self.consume_next_token(
+                        TokenType::RightParen,
+                        "Expect ')' after function call",
+                    )?;
+                    break;
+                }
+            }
+            let end_token = self.previous();
+            return Ok(Expr::Call(Box::new(expr), end_token, arguments));
+        }
+        Ok(expr)
     }
 
     fn primary(&mut self) -> Result<Expr> {
@@ -707,6 +799,75 @@ mod tests {
                 .join(", ")
         );
 
+        Ok(())
+    }
+
+    #[test]
+    fn parses_ast_correctly_call() -> Result<()> {
+        let mut scanner = Scanner::new(
+            r#"
+            // function
+            test_function(a, b);
+        "#
+            .into(),
+        );
+        let tokens = scanner.scan_tokens()?;
+        let mut parser = Parser::new(tokens);
+        let statements = parser.parse()?;
+        assert_eq!(
+            "(Fun call [(Var test_function)([Var(Token { token_type: Identifier, lexeme: \"a\", line: 3, literal: Some(Identifier(\"a\")) }), Var(Token { token_type: Identifier, lexeme: \"b\", line: 3, literal: Some(Identifier(\"b\")) })])])",
+            statements
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<String>>()
+                .join(", ")
+        );
+        let mut scanner = Scanner::new(
+            r#"
+            // function
+            test_function();
+        "#
+            .into(),
+        );
+        let tokens = scanner.scan_tokens()?;
+        let mut parser = Parser::new(tokens);
+        let statements = parser.parse()?;
+        assert_eq!(
+            "(Fun call [(Var test_function)([])])",
+            statements
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<String>>()
+                .join(", ")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parses_ast_correctly_fun_declaration() -> Result<()> {
+        let mut scanner = Scanner::new(
+            r#"
+            // function
+            
+            fun test_function(a, b) {
+                print a + b;
+            }
+
+            test_function("hello", "world");
+        "#
+            .into(),
+        );
+        let tokens = scanner.scan_tokens()?;
+        let mut parser = Parser::new(tokens);
+        let statements = parser.parse()?;
+        assert_eq!(
+            "Fun declaration[test_function([Token { token_type: Identifier, lexeme: \"a\", line: 4, literal: Some(Identifier(\"a\")) }, Token { token_type: Identifier, lexeme: \"b\", line: 4, literal: Some(Identifier(\"b\")) }]) [[Print(Binary(Var(Token { token_type: Identifier, lexeme: \"a\", line: 5, literal: Some(Identifier(\"a\")) }), Token { token_type: Plus, lexeme: \"+\", line: 5, literal: None }, Var(Token { token_type: Identifier, lexeme: \"b\", line: 5, literal: Some(Identifier(\"b\")) })))]]], (Fun call [(Var test_function)([Literal(Some(String(\"hello\"))), Literal(Some(String(\"world\")))])])",
+            statements
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<String>>()
+                .join(", ")
+        );
         Ok(())
     }
 }

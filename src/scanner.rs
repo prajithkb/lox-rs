@@ -98,7 +98,7 @@ impl Scanner {
             '!' => self.match_char_and_add_token('=', TokenType::BangEqual, TokenType::Bang),
             '=' => self.match_char_and_add_token('=', TokenType::EqualEqual, TokenType::Equal),
             '<' => self.match_char_and_add_token('=', TokenType::LessEqual, TokenType::Less),
-            '>' => self.match_char_and_add_token('>', TokenType::GreaterEqual, TokenType::Greater),
+            '>' => self.match_char_and_add_token('=', TokenType::GreaterEqual, TokenType::Greater),
             '/' => {
                 // Comment
                 if self.get_char() == '/' {
