@@ -11,7 +11,7 @@ use crate::parser::{Expr, Stmt};
 use crate::errors::*;
 use crate::tokens::{Literal, Token, TokenType};
 
-type Mutable<T> = Rc<RefCell<T>>;
+type Shared<T> = Rc<RefCell<T>>;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
@@ -20,6 +20,7 @@ pub enum Value {
     Number(f64),
     String(String),
     Function(LoxFunction),
+    // Special value for returning, to unwind the stack
     __Return(Box<Value>),
 }
 
@@ -38,11 +39,16 @@ impl Display for Value {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum LoxFunction {
-    Native(String, Vec<String>, Mutable<NativeFunction>),
-    UserDefined(String, Vec<String>, Rc<Vec<Stmt>>),
+    Native(
+        String,
+        Vec<String>,
+        Shared<NativeFunction>,
+        Shared<Environment>,
+    ),
+    UserDefined(String, Vec<String>, Rc<Vec<Stmt>>, Shared<Environment>),
 }
 
-type InnerNativeFunction = Box<dyn FnMut(Vec<Value>, Mutable<Environment>) -> Value>;
+type InnerNativeFunction = Box<dyn FnMut(Vec<Value>, Shared<Environment>) -> Value>;
 
 pub struct NativeFunction {
     name: String,
@@ -69,13 +75,14 @@ impl Debug for NativeFunction {
     }
 }
 
-struct Environment {
+#[derive(Debug, PartialEq)]
+pub struct Environment {
     values: HashMap<String, Value>,
-    enclosing: Option<Mutable<Environment>>,
+    enclosing: Option<Shared<Environment>>,
 }
 
 impl Environment {
-    pub fn new(enclosing: Option<Mutable<Environment>>) -> Self {
+    pub fn new(enclosing: Option<Shared<Environment>>) -> Self {
         Environment {
             values: HashMap::new(),
             enclosing,
@@ -115,8 +122,9 @@ impl Environment {
 }
 
 pub struct Interpreter<'a> {
-    globals: Mutable<Environment>,
-    environment: Mutable<Environment>,
+    #[allow(unused)]
+    globals: Shared<Environment>,
+    environment: Shared<Environment>,
     output_writer: Option<&'a mut dyn Write>,
 }
 
@@ -141,7 +149,7 @@ impl<'a> Interpreter<'a> {
         let environment = globals.clone();
         let mut interpreter = Interpreter {
             globals,
-            environment,
+            environment: environment.clone(),
             output_writer,
         };
         interpreter.environment().define(
@@ -153,6 +161,7 @@ impl<'a> Interpreter<'a> {
                     "clock".into(),
                     Interpreter::clock(),
                 ))),
+                environment,
             )),
         );
         interpreter
@@ -202,6 +211,9 @@ impl<'a> Interpreter<'a> {
         body: Rc<Vec<Stmt>>,
     ) -> Result<()> {
         let function_name = name.lexeme.clone();
+        let closure = Rc::new(RefCell::new(Environment::new(Some(
+            self.environment.clone(),
+        ))));
         let parameter_names: Vec<String> = parameters.iter().map(|p| p.lexeme.clone()).collect();
         self.environment().define(
             function_name,
@@ -209,6 +221,7 @@ impl<'a> Interpreter<'a> {
                 name.lexeme.clone(),
                 parameter_names,
                 body,
+                closure,
             )),
         );
         Ok(())
@@ -245,7 +258,7 @@ impl<'a> Interpreter<'a> {
     fn block_with_env(
         &mut self,
         statements: &[Stmt],
-        environment: Mutable<Environment>,
+        environment: Shared<Environment>,
     ) -> Result<Value> {
         let previous = self.environment.clone();
         self.environment = environment;
@@ -421,7 +434,7 @@ impl<'a> Interpreter<'a> {
     fn call(&mut self, expr: &Expr, left_paren: &Token, arguments: &[Expr]) -> Result<Value> {
         if let Value::Function(lox_function) = self.evaluate(expr)? {
             match lox_function {
-                LoxFunction::UserDefined(name, parameters, body) => {
+                LoxFunction::UserDefined(name, parameters, body, closure) => {
                     if parameters.len() != arguments.len() {
                         bail!(runtime_error_with_token(
                             format!(
@@ -438,22 +451,19 @@ impl<'a> Interpreter<'a> {
                         let evaluated_argument = self.evaluate(argument)?;
                         evaluated_arguments.push(evaluated_argument);
                     }
-                    let function_env =
-                        Rc::new(RefCell::new(Environment::new(Some(self.globals.clone()))));
+                    let function_env = closure;
                     for (i, arg) in evaluated_arguments.into_iter().enumerate() {
                         let mut e = (*function_env).borrow_mut();
                         e.define(parameters[i].clone(), arg);
                     }
+
                     if let Value::__Return(v) = self.block_with_env(body.as_ref(), function_env)? {
                         Ok(*v)
                     } else {
-                        bail!(runtime_error_with_token(
-                            "Internal error, invalid return from function call".to_string(),
-                            left_paren
-                        ))
+                        Ok(Value::Nil)
                     }
                 }
-                LoxFunction::Native(name, parameters, native_function) => {
+                LoxFunction::Native(name, parameters, native_function, closure) => {
                     if parameters.len() != arguments.len() {
                         bail!(runtime_error_with_token(
                             format!(
@@ -470,8 +480,7 @@ impl<'a> Interpreter<'a> {
                         let evaluated_argument = self.evaluate(argument)?;
                         evaluated_arguments.push(evaluated_argument);
                     }
-                    let function_env =
-                        Rc::new(RefCell::new(Environment::new(Some(self.globals.clone()))));
+                    let function_env = closure;
                     for (i, arg) in evaluated_arguments.clone().into_iter().enumerate() {
                         let mut e = (*function_env).borrow_mut();
                         e.define(parameters[i].clone(), arg);
