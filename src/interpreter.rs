@@ -1022,6 +1022,39 @@ outer variable set to inner variable
         assert_eq!("hello world\n5\n", output);
         Ok(())
     }
+    #[test]
+    fn closure() -> Result<()> {
+        // Closure
+        let mut scanner = Scanner::new(
+            r#"
+            // function
+            
+            fun makeCounter() {
+                var i = 0;
+                fun count() {
+                  i = i + 1;
+                  print i;
+                }
+              
+                return count;
+              }
+              
+              var counter = makeCounter();
+              counter(); // "1".
+              counter(); // "2"
+        "#
+            .into(),
+        );
+        let tokens = scanner.scan_tokens()?;
+        let mut parser = Parser::new(tokens);
+        let statements = parser.parse()?;
+        let mut buf = vec![];
+        let mut interpreter = Interpreter::new_with_writer(Some(&mut buf));
+        interpreter.interpret(&statements)?;
+        let output = utf8_to_string(&buf);
+        assert_eq!("1\n2\n", output);
+        Ok(())
+    }
 
     #[test]
     fn environment_tests() {
