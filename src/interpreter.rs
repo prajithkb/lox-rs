@@ -37,7 +37,7 @@ impl Display for Value {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, PartialEq)]
 pub enum LoxFunction {
     Native(
         String,
@@ -46,6 +46,15 @@ pub enum LoxFunction {
         Shared<Environment>,
     ),
     UserDefined(String, Vec<String>, Rc<Vec<Stmt>>, Shared<Environment>),
+}
+
+impl Debug for LoxFunction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Native(arg0, _, _, _) => f.debug_tuple("Native").field(arg0).finish(),
+            Self::UserDefined(arg0, _, _, _) => f.debug_tuple("UserDefined").field(arg0).finish(),
+        }
+    }
 }
 
 type InnerNativeFunction = Box<dyn FnMut(Vec<Value>, Shared<Environment>) -> Value>;
@@ -119,12 +128,29 @@ impl Environment {
             },
         }
     }
+
+    pub fn get_at(&mut self, name: &str, hops: usize) -> Option<Value> {
+        if hops == 0 {
+            self.get(name)
+        } else {
+            self.get_at(name, hops - 1)
+        }
+    }
+
+    pub fn assign_at(&mut self, name: &str, value: Value, hops: usize) -> Option<Value> {
+        if hops == 0 {
+            self.assign(name, value)
+        } else {
+            self.assign_at(name, value, hops - 1)
+        }
+    }
 }
 
 pub struct Interpreter<'a> {
     #[allow(unused)]
     globals: Shared<Environment>,
     environment: Shared<Environment>,
+    locals: HashMap<String, usize>,
     output_writer: Option<&'a mut dyn Write>,
 }
 
@@ -146,11 +172,11 @@ impl<'a> Interpreter<'a> {
 
     fn new_with_writer(output_writer: Option<&'a mut dyn Write>) -> Self {
         let globals = Rc::new(RefCell::new(Environment::new(None)));
-        let environment = globals.clone();
         let mut interpreter = Interpreter {
-            globals,
-            environment: environment.clone(),
+            globals: globals.clone(),
+            environment: globals.clone(),
             output_writer,
+            locals: HashMap::new(),
         };
         interpreter.environment().define(
             "clock".into(),
@@ -161,7 +187,7 @@ impl<'a> Interpreter<'a> {
                     "clock".into(),
                     Interpreter::clock(),
                 ))),
-                environment,
+                globals,
             )),
         );
         interpreter
@@ -171,7 +197,12 @@ impl<'a> Interpreter<'a> {
         (*self.environment).borrow_mut()
     }
 
-    pub fn interpret(&mut self, statements: &[Stmt]) -> Result<()> {
+    pub fn interpret(
+        &mut self,
+        statements: &[Stmt],
+        resolved_variables: HashMap<String, usize>,
+    ) -> Result<()> {
+        self.locals = resolved_variables;
         for statement in statements {
             self.execute(statement)?;
         }
@@ -324,7 +355,7 @@ impl<'a> Interpreter<'a> {
             Expr::Grouping(expr) => self.evaluate_grouping(expr),
             Expr::Literal(literal) => self.evaluate_literal(literal.clone()),
             Expr::Unary(operator, right) => self.evaluate_unary(operator, right),
-            Expr::Var(name) => self.evaluate_var(name),
+            Expr::Var(name) => self.evaluate_var(name, expr),
             Expr::Assign(name, expr) => self.evaluate_assignment(name, expr),
             Expr::Logical(left, operator, right) => self.evaluate_logical(left, operator, right),
             Expr::Call(expr, call_paren, arguments) => self.call(expr, call_paren, arguments),
@@ -333,8 +364,13 @@ impl<'a> Interpreter<'a> {
 
     fn evaluate_assignment(&mut self, name: &Token, expr: &Expr) -> Result<Value> {
         let value = self.evaluate(expr)?;
-        match self.environment().assign(&name.lexeme, value.clone()) {
-            Some(_) => Ok(value),
+        let distance = self.lookup_variable(expr);
+        let result = match distance {
+            Some(hops) => self.environment().assign_at(&name.lexeme, value, hops),
+            None => self.globals.borrow_mut().assign(&name.lexeme, value),
+        };
+        match result {
+            Some(value) => Ok(value),
             None => bail!(runtime_error_with_token(
                 format!("var {} is not defined", &name.lexeme),
                 name
@@ -342,14 +378,26 @@ impl<'a> Interpreter<'a> {
         }
     }
 
-    fn evaluate_var(&mut self, name: &Token) -> Result<Value> {
-        match self.environment().get(&name.lexeme) {
+    fn evaluate_var(&mut self, name: &Token, expr: &Expr) -> Result<Value> {
+        let distance = self.lookup_variable(expr);
+        let result = match distance {
+            Some(hops) => self.environment().get_at(&name.lexeme, hops),
+            None => {
+                let globals = self.globals.borrow();
+                globals.get(&name.lexeme)
+            }
+        };
+        match result {
             Some(v) => Ok(v),
             None => bail!(runtime_error_with_token(
                 format!("var {} is not defined", &name.lexeme),
                 name
             )),
         }
+    }
+
+    fn lookup_variable(&self, expr: &Expr) -> Option<usize> {
+        self.locals.get(&expr.to_string()).copied()
     }
 
     fn evaluate_literal(&mut self, literal: Option<Literal>) -> Result<Value> {
@@ -635,6 +683,7 @@ mod tests {
         errors::*,
         interpreter::Value,
         parser::{Parser, Stmt},
+        resolver::Resolver,
         scanner::Scanner,
     };
     use std::{cell::RefCell, f64::EPSILON, rc::Rc};
@@ -785,10 +834,12 @@ mod tests {
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
         let statements = parser.parse()?;
+        let mut resolver = Resolver::new();
+        let locals = resolver.resolve(&statements)?;
         let mut buf = vec![];
         let mut interpreter = Interpreter::new_with_writer(Some(&mut buf));
         let expected = "hello world!\n".to_string();
-        interpreter.interpret(&statements)?;
+        interpreter.interpret(&statements, locals)?;
         assert_eq!(expected, utf8_to_string(&buf));
 
         let mut scanner = Scanner::new(
@@ -802,10 +853,12 @@ mod tests {
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
         let statements = parser.parse()?;
+        let mut resolver = Resolver::new();
+        let locals = resolver.resolve(&statements)?;
         let mut buf = vec![];
         let mut interpreter = Interpreter::new_with_writer(Some(&mut buf));
         let expected = "true\n".to_string();
-        interpreter.interpret(&statements)?;
+        interpreter.interpret(&statements, locals)?;
         assert_eq!(expected, utf8_to_string(&buf));
         Ok(())
     }
@@ -831,6 +884,8 @@ mod tests {
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
         let statements = parser.parse()?;
+        let mut resolver = Resolver::new();
+        let locals = resolver.resolve(&statements)?;
         let mut buf = vec![];
         let mut interpreter = Interpreter::new_with_writer(Some(&mut buf));
         let expected = r#"outer variable
@@ -839,7 +894,7 @@ created a new inner variable
 outer variable set to inner variable
 "#
         .to_string();
-        match interpreter.interpret(&statements) {
+        match interpreter.interpret(&statements, locals) {
             Ok(_) => panic!("Should fail!"),
             Err(e) => assert_eq!(
                 "Runtime Error: [line: 12] Error at <inner>: var inner is not defined",
@@ -874,10 +929,12 @@ outer variable set to inner variable
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
         let statements = parser.parse()?;
+        let mut resolver = Resolver::new();
+        let locals = resolver.resolve(&statements)?;
         let mut buf = vec![];
         let mut interpreter = Interpreter::new_with_writer(Some(&mut buf));
         let expected = "if\nsecond else\n".to_string();
-        interpreter.interpret(&statements)?;
+        interpreter.interpret(&statements, locals)?;
         assert_eq!(expected, utf8_to_string(&buf));
         Ok(())
     }
@@ -917,10 +974,12 @@ outer variable set to inner variable
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
         let statements = parser.parse()?;
+        let mut resolver = Resolver::new();
+        let locals = resolver.resolve(&statements)?;
         let mut buf = vec![];
         let mut interpreter = Interpreter::new_with_writer(Some(&mut buf));
         let expected = "one\ntwo\nthree\nfour\n".to_string();
-        interpreter.interpret(&statements)?;
+        interpreter.interpret(&statements, locals)?;
         assert_eq!(expected, utf8_to_string(&buf));
         Ok(())
     }
@@ -941,10 +1000,12 @@ outer variable set to inner variable
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
         let statements = parser.parse()?;
+        let mut resolver = Resolver::new();
+        let locals = resolver.resolve(&statements)?;
         let mut buf = vec![];
         let mut interpreter = Interpreter::new_with_writer(Some(&mut buf));
         let expected = "1\n2\n3\n4\n".to_string();
-        interpreter.interpret(&statements)?;
+        interpreter.interpret(&statements, locals)?;
         assert_eq!(expected, utf8_to_string(&buf));
         Ok(())
     }
@@ -967,10 +1028,12 @@ outer variable set to inner variable
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
         let statements = parser.parse()?;
+        let mut resolver = Resolver::new();
+        let locals = resolver.resolve(&statements)?;
         let mut buf = vec![];
         let mut interpreter = Interpreter::new_with_writer(Some(&mut buf));
         let expected = "0\n1\n1\n2\n3\n5\n8\n13\n21\n34\n55\n89\n".to_string();
-        interpreter.interpret(&statements)?;
+        interpreter.interpret(&statements, locals)?;
         assert_eq!(expected, utf8_to_string(&buf));
         Ok(())
     }
@@ -987,9 +1050,11 @@ outer variable set to inner variable
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
         let statements = parser.parse()?;
+        let mut resolver = Resolver::new();
+        let locals = resolver.resolve(&statements)?;
         let mut buf = vec![];
         let mut interpreter = Interpreter::new_with_writer(Some(&mut buf));
-        interpreter.interpret(&statements)?;
+        interpreter.interpret(&statements, locals)?;
         let output = utf8_to_string(&buf);
         // This will fail if it is not f64
         let _ = output.trim().parse::<f64>().unwrap();
@@ -1015,9 +1080,11 @@ outer variable set to inner variable
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
         let statements = parser.parse()?;
+        let mut resolver = Resolver::new();
+        let locals = resolver.resolve(&statements)?;
         let mut buf = vec![];
         let mut interpreter = Interpreter::new_with_writer(Some(&mut buf));
-        interpreter.interpret(&statements)?;
+        interpreter.interpret(&statements, locals)?;
         let output = utf8_to_string(&buf);
         assert_eq!("hello world\n5\n", output);
         Ok(())
@@ -1048,9 +1115,11 @@ outer variable set to inner variable
         let tokens = scanner.scan_tokens()?;
         let mut parser = Parser::new(tokens);
         let statements = parser.parse()?;
+        let mut resolver = Resolver::new();
+        let locals = resolver.resolve(&statements)?;
         let mut buf = vec![];
         let mut interpreter = Interpreter::new_with_writer(Some(&mut buf));
-        interpreter.interpret(&statements)?;
+        interpreter.interpret(&statements, locals)?;
         let output = utf8_to_string(&buf);
         assert_eq!("1\n2\n", output);
         Ok(())

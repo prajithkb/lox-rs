@@ -13,6 +13,10 @@ mod errors {
                 description("Parse Error")
                 display("Parse Error: {}", message)
             }
+            ResolutionError(message: String) {
+                description("Resolution Error")
+                display("Resolution Error: {}", message)
+            }
             RuntimeError(message: String) {
                 description("Runtime Error")
                 display("Runtime Error: {}", message)
@@ -29,5 +33,6 @@ pub use errors::*;
 mod interpreter;
 pub mod lox;
 mod parser;
+mod resolver;
 mod scanner;
 mod tokens;

@@ -6,7 +6,9 @@ use std::{
 
 use log::debug;
 
-use crate::{errors::*, interpreter::Interpreter, parser::Parser, scanner::Scanner};
+use crate::{
+    errors::*, interpreter::Interpreter, parser::Parser, resolver::Resolver, scanner::Scanner,
+};
 pub struct Lox<'a> {
     error: Option<LoxError>,
     interpreter: Interpreter<'a>,
@@ -60,17 +62,27 @@ impl<'a> Lox<'a> {
             Ok(tokens) => {
                 debug!("Created Tokens : {:?}", tokens);
                 let mut parser = Parser::new(tokens);
+                let mut resolver = Resolver::new();
                 let statements = parser.parse()?;
                 debug!("Created Statements: {:?}", statements);
-                match self.interpreter.interpret(&statements) {
-                    Ok(_) => {
-                        debug!("Interpreted successfully!");
-                        Ok(())
+                match resolver.resolve(&statements) {
+                    Ok(resolved_variables) => {
+                        match self.interpreter.interpret(&statements, resolved_variables) {
+                            Ok(_) => {
+                                debug!("Interpreted successfully!");
+                                Ok(())
+                            }
+                            Err(runtime_error) => {
+                                self.error = Some(LoxError::RuntimeError);
+                                report_error(runtime_error.to_string(), &mut stdout());
+                                Err(runtime_error)
+                            }
+                        }
                     }
-                    Err(runtime_error) => {
-                        self.error = Some(LoxError::RuntimeError);
-                        report_error(runtime_error.to_string(), &mut stdout());
-                        Err(runtime_error)
+                    Err(resolver_error) => {
+                        self.error = Some(LoxError::SyntaxError);
+                        report_error(resolver_error.to_string(), &mut stdout());
+                        Err(resolver_error)
                     }
                 }
             }
