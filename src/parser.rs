@@ -218,7 +218,7 @@ impl<'a> Parser<'a> {
         if self.peek_token().token_type != TokenType::Semicolon {
             return_expr = Some(Box::new(self.expression()?));
         }
-        self.consume_next_token(TokenType::Semicolon, "Expect ';' after return value")?;
+        self.consume_next_token(TokenType::Semicolon, "Expect ';' after return")?;
         Ok(Stmt::Return(keyword, return_expr))
     }
 

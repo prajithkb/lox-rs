@@ -295,12 +295,18 @@ impl<'a> Interpreter<'a> {
         self.environment = environment;
         let mut value = Value::Nil;
         for statement in statements {
-            if let Value::__Return(v) = self.execute(statement).map_err(|e| {
-                self.environment = previous.clone();
-                e
-            })? {
-                value = Value::__Return(v);
-                break;
+            let result = self.execute(statement);
+            match result {
+                Ok(output) => {
+                    if let Value::__Return(v) = output {
+                        value = Value::__Return(v);
+                        break;
+                    }
+                }
+                Err(e) => {
+                    self.environment = previous;
+                    return Err(e);
+                }
             }
         }
         self.environment = previous;
@@ -497,14 +503,14 @@ impl<'a> Interpreter<'a> {
                     let mut evaluated_arguments = vec![];
                     for argument in arguments {
                         let evaluated_argument = self.evaluate(argument)?;
+                        // dbg!(argument, &evaluated_argument);
                         evaluated_arguments.push(evaluated_argument);
                     }
-                    let function_env = closure;
+                    let function_env = Rc::new(RefCell::new(Environment::new(Some(closure))));
                     for (i, arg) in evaluated_arguments.into_iter().enumerate() {
                         let mut e = (*function_env).borrow_mut();
                         e.define(parameters[i].clone(), arg);
                     }
-
                     if let Value::__Return(v) = self.block_with_env(body.as_ref(), function_env)? {
                         Ok(*v)
                     } else {
@@ -1122,6 +1128,40 @@ outer variable set to inner variable
         interpreter.interpret(&statements, locals)?;
         let output = utf8_to_string(&buf);
         assert_eq!("1\n2\n", output);
+        Ok(())
+    }
+
+    #[test]
+    fn fibonacci() -> Result<()> {
+        let mut scanner = Scanner::new(
+            r#"
+            // Fibonacci
+            fun fib(n) {
+              if (n <= 1) 
+                  return n;
+              return fib(n - 2) + fib(n - 1);
+            }
+            
+            for (var i = 0; i < 20; i = i + 1) {
+              print fib(i);
+            }
+            
+        "#
+            .into(),
+        );
+        let tokens = scanner.scan_tokens()?;
+        let mut parser = Parser::new(tokens);
+        let statements = parser.parse()?;
+        let mut resolver = Resolver::new();
+        let locals = resolver.resolve(&statements)?;
+        let mut buf = vec![];
+        let mut interpreter = Interpreter::new_with_writer(Some(&mut buf));
+        interpreter.interpret(&statements, locals)?;
+        let output = utf8_to_string(&buf);
+        assert_eq!(
+            "0\n1\n1\n2\n3\n5\n8\n13\n21\n34\n55\n89\n144\n233\n377\n610\n987\n1597\n2584\n4181\n",
+            output
+        );
         Ok(())
     }
 

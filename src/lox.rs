@@ -2,9 +2,10 @@ use std::{
     fs::File,
     io::{self, stdout, Read, Write},
     process::exit,
+    time::Instant,
 };
 
-use log::debug;
+use log::{debug, info};
 
 use crate::{
     errors::*, interpreter::Interpreter, parser::Parser, resolver::Resolver, scanner::Scanner,
@@ -58,17 +59,35 @@ impl<'a> Lox<'a> {
 
     pub fn run(&mut self, content: String) -> Result<()> {
         let mut scanner = Scanner::new(content);
+        let start_time = Instant::now();
         match scanner.scan_tokens() {
             Ok(tokens) => {
                 debug!("Created Tokens : {:?}", tokens);
+                info!("Tokens created in {} us", start_time.elapsed().as_micros());
+                let start_time = Instant::now();
                 let mut parser = Parser::new(tokens);
                 let mut resolver = Resolver::new();
                 let statements = parser.parse()?;
                 debug!("Created Statements: {:?}", statements);
+                info!(
+                    "Statements created in {} us",
+                    start_time.elapsed().as_micros()
+                );
+                let start_time = Instant::now();
                 match resolver.resolve(&statements) {
                     Ok(resolved_variables) => {
+                        info!(
+                            "Statements resolved in {} us",
+                            start_time.elapsed().as_micros()
+                        );
+                        let start_time = Instant::now();
                         match self.interpreter.interpret(&statements, resolved_variables) {
                             Ok(_) => {
+                                info!(
+                                    "Statements interpreted in {} us ({} ms)",
+                                    start_time.elapsed().as_micros(),
+                                    start_time.elapsed().as_millis()
+                                );
                                 debug!("Interpreted successfully!");
                                 Ok(())
                             }
