@@ -236,11 +236,7 @@ impl Resolver {
         Ok(())
     }
 
-    fn resolve_var_declaration(
-        &mut self,
-        name: &Token,
-        initializer: &Option<Box<Expr>>,
-    ) -> Result<()> {
+    fn resolve_var_declaration(&mut self, name: &Token, initializer: &Option<Expr>) -> Result<()> {
         self.declare(name)?;
         if let Some(init) = initializer {
             self.resolve_expression(init)?;

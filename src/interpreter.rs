@@ -269,7 +269,7 @@ impl<'a> Interpreter<'a> {
         Ok(Value::Nil)
     }
 
-    fn return_statement(&mut self, expr: &Option<Box<Expr>>) -> Result<Value> {
+    fn return_statement(&mut self, expr: &Option<Expr>) -> Result<Value> {
         match expr {
             Some(expr) => Ok(Value::__Return(Box::new(self.evaluate(expr)?))),
             None => Ok(Value::Nil),
@@ -308,7 +308,7 @@ impl<'a> Interpreter<'a> {
         Ok(())
     }
 
-    fn var_statement(&mut self, token: &Token, expr: &Option<Box<Expr>>) -> Result<()> {
+    fn var_statement(&mut self, token: &Token, expr: &Option<Expr>) -> Result<()> {
         let name = token.lexeme.clone();
         let value = match expr {
             Some(e) => self.evaluate(e)?,
@@ -360,7 +360,6 @@ impl<'a> Interpreter<'a> {
         if_branch: &Stmt,
         else_branch: &Option<Box<Stmt>>,
     ) -> Result<Value> {
-        let condition_str = condition.to_string();
         let evaluated_condition = self.evaluate(condition);
         if let Value::Boolean(is_true) = evaluated_condition? {
             if is_true {
@@ -373,7 +372,7 @@ impl<'a> Interpreter<'a> {
         }
         bail!(runtime_error(format!(
             "Condition {} did not evaluate to a boolean",
-            condition_str
+            condition.to_string()
         )))
     }
 
@@ -534,6 +533,8 @@ impl<'a> Interpreter<'a> {
     }
 
     fn lookup_variable(&self, expr: &Expr) -> Option<usize> {
+        // Some(0)
+        // This is expensive! Need to find an alternative
         self.locals.get(&expr.to_string()).copied()
     }
 
@@ -677,12 +678,12 @@ impl<'a> Interpreter<'a> {
             let evaluated_argument = self.evaluate(argument)?;
             evaluated_arguments.push(evaluated_argument);
         }
-        let function_env = Rc::new(RefCell::new(Environment::new(Some(closure))));
+        let mut env = Environment::new(Some(closure));
         for (i, arg) in evaluated_arguments.into_iter().enumerate() {
-            let mut e = (*function_env).borrow_mut();
-            e.define(parameters[i].clone(), arg);
+            env.define(parameters[i].clone(), arg);
         }
-        if let Value::__Return(v) = self.block_with_env(body.as_ref(), function_env)? {
+        let function_env = Rc::new(RefCell::new(env));
+        if let Value::__Return(v) = self.block_with_env(body, function_env)? {
             Ok(*v)
         } else {
             Ok(Value::Nil)

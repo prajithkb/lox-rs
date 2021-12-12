@@ -30,14 +30,14 @@ impl Display for Expr {
 /// Statments
 #[derive(Debug, PartialEq)]
 pub enum Stmt {
-    Expression(Box<Expr>),
-    Print(Box<Expr>),
-    Var(Token, Option<Box<Expr>>),
+    Expression(Expr),
+    Print(Expr),
+    Var(Token, Option<Expr>),
     Block(Vec<Stmt>),
     If(Box<Expr>, Box<Stmt>, Option<Box<Stmt>>),
-    While(Box<Expr>, Box<Stmt>),
+    While(Expr, Box<Stmt>),
     Function(Token, Vec<Token>, Rc<Vec<Stmt>>),
-    Return(Token, Option<Box<Expr>>),
+    Return(Token, Option<Expr>),
     Class(Token, Rc<Vec<Stmt>>),
 }
 
@@ -229,7 +229,7 @@ impl<'a> Parser<'a> {
         let keyword = self.previous();
         let mut return_expr = None;
         if self.peek_token().token_type != TokenType::Semicolon {
-            return_expr = Some(Box::new(self.expression()?));
+            return_expr = Some(self.expression()?);
         }
         self.consume_next_token(TokenType::Semicolon, "Expect ';' after return")?;
         Ok(Stmt::Return(keyword, return_expr))
@@ -260,16 +260,11 @@ impl<'a> Parser<'a> {
         let mut body = self.statement()?;
 
         if let Some(increment) = increment {
-            body = Stmt::Block(vec![body, Stmt::Expression(Box::new(increment))])
+            body = Stmt::Block(vec![body, Stmt::Expression(increment)])
         }
         match condition {
-            Some(condition) => body = Stmt::While(Box::new(condition), Box::new(body)),
-            None => {
-                body = Stmt::While(
-                    Box::new(Expr::Literal(Literal::opt_bool(true))),
-                    Box::new(body),
-                )
-            }
+            Some(condition) => body = Stmt::While(condition, Box::new(body)),
+            None => body = Stmt::While(Expr::Literal(Literal::opt_bool(true)), Box::new(body)),
         }
         match initializer {
             Some(initializer) => Ok(Stmt::Block(vec![initializer, body])),
@@ -282,7 +277,7 @@ impl<'a> Parser<'a> {
         let condition = self.expression()?;
         self.consume_next_token(TokenType::RightParen, "Expect ')' after while condition")?;
         let body = self.statement()?;
-        Ok(Stmt::While(Box::new(condition), Box::new(body)))
+        Ok(Stmt::While(condition, Box::new(body)))
     }
 
     fn if_statement(&mut self) -> Result<Stmt> {
@@ -304,14 +299,14 @@ impl<'a> Parser<'a> {
     fn print_statement(&mut self) -> Result<Stmt> {
         let expr = self.expression()?;
         self.consume_next_token(TokenType::Semicolon, "Expect ';' after print")
-            .map(|_| Ok(Stmt::Print(Box::new(expr))))?
+            .map(|_| Ok(Stmt::Print(expr)))?
     }
 
     fn var_declaration_statement(&mut self) -> Result<Stmt> {
         match self.consume_next_token(TokenType::Identifier, "Expect variable name") {
             Ok(token) => {
                 let initializer = if self.match_and_advance(&[TokenType::Equal]) {
-                    Some(Box::new(self.expression()?))
+                    Some(self.expression()?)
                 } else {
                     None
                 };
@@ -379,7 +374,7 @@ impl<'a> Parser<'a> {
     fn expression_statement(&mut self) -> Result<Stmt> {
         let expr = self.expression()?;
         self.consume_next_token(TokenType::Semicolon, "Expect ';' after expression")
-            .map(|_| Ok(Stmt::Expression(Box::new(expr))))?
+            .map(|_| Ok(Stmt::Expression(expr)))?
     }
 
     fn expression(&mut self) -> Result<Expr> {
