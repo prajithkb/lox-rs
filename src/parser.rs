@@ -1,6 +1,6 @@
 use log::debug;
 
-use crate::{errors::*, lox::report_error, tokens::TokenType};
+use crate::{errors::*, lox_interpreter::report_error, tokens::TokenType};
 use std::{fmt::Display, io::stdout, rc::Rc};
 
 use crate::tokens::{Literal, Token};
