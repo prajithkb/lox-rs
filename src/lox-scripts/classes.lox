@@ -1,0 +1,30 @@
+ class Cake {
+    
+    init(type) {
+        this.type = type;
+    }
+    taste() {
+        this.inner_taste();
+        this.flavor = "Belgian chocolate";
+    }
+
+     taste_again() {
+        this.inner_taste();
+    }
+
+    inner_taste() {
+        var adjective = "delicious";
+        print "The " + this.flavor + " " + this.type + " is " + adjective + "!";
+    }
+}
+
+var cake = Cake("cake");
+cake.flavor = "German chocolate";
+cake.taste();
+cake.taste_again(); 
+
+
+var cake = Cake("cookie");
+cake.flavor = "German chocolate";
+cake.taste();
+cake.taste_again(); 

@@ -10,11 +10,14 @@ pub struct Resolver {
     scopes: Vec<HashMap<String, bool>>,
     variable_depths: HashMap<String, usize>,
     current_function: FunctionType,
+    current_class: ClassType,
 }
 #[derive(Debug, Clone, Copy)]
 enum FunctionType {
     None,
     Function,
+    Method,
+    Initializer,
 }
 
 impl Default for FunctionType {
@@ -23,6 +26,17 @@ impl Default for FunctionType {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum ClassType {
+    None,
+    Class,
+}
+
+impl Default for ClassType {
+    fn default() -> Self {
+        Self::None
+    }
+}
 fn resolution_error(token: Option<&Token>, message: &str) -> ErrorKind {
     match token {
         Some(t) => ErrorKind::ResolutionError(format!(
@@ -84,7 +98,11 @@ impl Resolver {
                         Some(t),
                         "Return statements can only be present in functions"
                     )),
-                    FunctionType::Function => {
+                    FunctionType::Initializer => bail!(resolution_error(
+                        Some(t),
+                        "Return statements cannot be present in init (constructors)"
+                    )),
+                    _ => {
                         if let Some(e) = expr {
                             self.resolve_expression(e)?;
                         }
@@ -101,7 +119,36 @@ impl Resolver {
             }
             Stmt::Var(name, initializer) => self.resolve_var_declaration(name, initializer),
             Stmt::Block(stmts) => self.block(stmts),
+            Stmt::Class(name, methods) => self.class(name, methods),
         }
+    }
+
+    fn class(&mut self, name: &Token, methods: &[Stmt]) -> Result<()> {
+        let enclosing_class = self.current_class;
+        self.current_class = ClassType::Class;
+        self.define(name);
+        self.begin_scope();
+        self.peek().map(|s| s.insert("this".to_string(), true));
+        for method in methods {
+            if let Stmt::Function(name, params, body) = method {
+                let mut function_type = FunctionType::Method;
+                if name.lexeme == "init" {
+                    function_type = FunctionType::Initializer;
+                }
+                self.declare(name)?;
+                self.define(name);
+                self.resolve_function_params_body(params, body, function_type)?;
+            } else {
+                bail!(resolution_error(
+                    Some(name),
+                    "Class declaration can have only methods"
+                ));
+            }
+        }
+        self.declare(name)?;
+        self.end_scope();
+        self.current_class = enclosing_class;
+        Ok(())
     }
 
     fn resolve_expression(&mut self, e: &Expr) -> Result<()> {
@@ -130,9 +177,26 @@ impl Resolver {
             // The ones to be impl
             Expr::Var(t) => self.resolve_var_expression(t, e),
             Expr::Assign(name, e) => self.resolve_var_assign(name, e),
+            Expr::Get(object_expr, _) => self.resolve_expression(object_expr),
+            Expr::Set(object_expr, _, value) => self.set_expression(object_expr, value),
+            Expr::This(keyword) => {
+                if self.current_class == ClassType::None {
+                    bail!(resolution_error(
+                        Some(keyword),
+                        "Can't use 'this' outside of a class"
+                    ))
+                }
+                self.resolve_local(keyword, e);
+                Ok(())
+            }
         }
     }
 
+    fn set_expression(&mut self, object_expr: &Expr, value: &Expr) -> Result<()> {
+        self.resolve_expression(object_expr)?;
+        self.resolve_expression(value)?;
+        Ok(())
+    }
     fn block(&mut self, stmts: &[Stmt]) -> Result<()> {
         self.begin_scope();
         for stmt in stmts {

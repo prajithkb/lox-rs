@@ -16,6 +16,9 @@ pub enum Expr {
     Assign(Token, Box<Expr>),
     Logical(Box<Expr>, Token, Box<Expr>),
     Call(Box<Expr>, Token, Vec<Expr>),
+    Get(Box<Expr>, Token),
+    Set(Box<Expr>, Token, Box<Expr>),
+    This(Token),
 }
 
 impl Display for Expr {
@@ -35,6 +38,7 @@ pub enum Stmt {
     While(Box<Expr>, Box<Stmt>),
     Function(Token, Vec<Token>, Rc<Vec<Stmt>>),
     Return(Token, Option<Box<Expr>>),
+    Class(Token, Rc<Vec<Stmt>>),
 }
 
 impl Display for Stmt {
@@ -62,6 +66,11 @@ fn to_string_expr(expr: &Expr) -> String {
         Expr::Call(callee, _, arguments) => {
             parenthesize(&format!("Fun call [{}({:?})]", callee, arguments), &[])
         }
+        Expr::Get(object, property) => parenthesize(&format!("Get[{}.{}]", object, property), &[]),
+        Expr::Set(object, property, value) => {
+            parenthesize(&format!("GSetet[{}.{}={}]", object, property, value), &[])
+        }
+        Expr::This(keyword) => parenthesize(&keyword.lexeme, &[]),
     }
 }
 
@@ -90,6 +99,7 @@ fn to_string_stmt(stmt: &Stmt) -> String {
             )
         }
         Stmt::Return(_, expr) => format!("Return {:?}", expr),
+        Stmt::Class(name, methods) => format!("Class declaration {:?}[{:?}]", name, methods),
     }
 }
 
@@ -115,7 +125,8 @@ fn parse_error(token: &Token, message: &str) -> ErrorKind {
 ///  Grammer from https://craftinginterpreters.com
 /// ```txt
 /// program        → declaration* EOF ;
-/// declaration    → funDecl| varDecl | statement ;
+/// declaration    →  classDecl | funDecl| varDecl | statement ;
+/// classDecl      → "class" IDENTIFIER "{" function* "}" ;
 /// varDecl        → "var" IDENTIFIER ( "=" expression )? ";"
 /// funDecl        → "fun" function ;
 /// function       → IDENTIFIER "(" parameters? ")" block ;
@@ -127,7 +138,7 @@ fn parse_error(token: &Token, message: &str) -> ErrorKind {
 /// block          → "{" declaration* "}" ;
 /// arguments      → expression ( "," expression )* ;
 /// expression     → assignment ;
-/// assignment     → IDENTIFIER "=" assignment | logic_or ;
+/// assignment     → ( call "." )? IDENTIFIER "=" assignment | logic_or ;
 /// logic_or       → logic_and ( "or" logic_and )* ;
 /// logic_and      → equality ( "and" equality )* ;
 /// printStmt      → "print" expression ";" ;
@@ -137,7 +148,7 @@ fn parse_error(token: &Token, message: &str) -> ErrorKind {
 /// term           → factor ( ( "-" | "+" ) factor )* ;
 /// factor         → unary ( ( "/" | "*" ) unary )* ;
 /// unary          → ( "!" | "-" ) unary | primary ;
-/// call           → primary ( "(" arguments? ")" )* ;
+/// call           → primary ( "(" arguments? ")" )* | "." IDENTIFIER )* ;
 /// primary        → NUMBER | STRING | "true" | "false" | "nil"
 ///                | "(" expression ")"  | IDENTIFIER;
 ///```
@@ -189,6 +200,8 @@ impl<'a> Parser<'a> {
             self.var_declaration_statement()
         } else if self.match_and_advance(&[TokenType::Fun]) {
             self.fun_declaration_statement()
+        } else if self.match_and_advance(&[TokenType::Class]) {
+            self.class_declaration_statement()
         } else {
             self.statement()
         }
@@ -311,6 +324,21 @@ impl<'a> Parser<'a> {
             Err(e) => Err(e),
         }
     }
+    fn class_declaration_statement(&mut self) -> Result<Stmt> {
+        let mut methods = vec![];
+        match self.consume_next_token(TokenType::Identifier, "Expect class name") {
+            Ok(token) => {
+                self.consume_next_token(TokenType::LeftBrace, "Expect '{' before class body")?;
+                while self.peek_token().token_type != TokenType::RightBrace {
+                    let function = self.fun_declaration_statement()?;
+                    methods.push(function);
+                }
+                self.consume_next_token(TokenType::RightBrace, "Expect '}' after class body")?;
+                Ok(Stmt::Class(token, Rc::new(methods)))
+            }
+            Err(e) => Err(e),
+        }
+    }
 
     fn fun_declaration_statement(&mut self) -> Result<Stmt> {
         let mut parameters = vec![];
@@ -365,6 +393,8 @@ impl<'a> Parser<'a> {
             let value = self.assignment()?;
             if let Expr::Var(name) = expr {
                 return Ok(Expr::Assign(name, Box::new(value)));
+            } else if let Expr::Get(e, name) = expr {
+                return Ok(Expr::Set(e, name, Box::new(value)));
             }
             bail!(parse_error(&equals, "Invalid assignment target"))
         }
@@ -448,26 +478,37 @@ impl<'a> Parser<'a> {
     }
 
     fn call(&mut self) -> Result<Expr> {
-        let expr = self.primary()?;
+        let mut expr = self.primary()?;
+        loop {
+            if self.match_and_advance(&[TokenType::LeftParen]) {
+                expr = self.finish_call(expr)?;
+            } else if self.match_and_advance(&[TokenType::Dot]) {
+                let name =
+                    self.consume_next_token(TokenType::Identifier, "Expect property after '.'")?;
+                expr = Expr::Get(Box::new(expr), name);
+            } else {
+                break;
+            }
+        }
+        Ok(expr)
+    }
+
+    fn finish_call(&mut self, expr: Expr) -> Result<Expr> {
         let mut arguments = vec![];
-        if self.match_and_advance(&[TokenType::LeftParen]) {
+        if self.peek_token().token_type != TokenType::RightParen {
             loop {
-                if self.peek_token().token_type != TokenType::RightParen {
-                    let argument = self.expression()?;
-                    arguments.push(argument);
-                }
-                if !self.match_and_advance(&[TokenType::Comma]) {
-                    self.consume_next_token(
-                        TokenType::RightParen,
-                        "Expect ')' after function call",
-                    )?;
+                let argument = self.expression()?;
+                arguments.push(argument);
+                if self.peek_token().token_type == TokenType::Comma {
+                    self.advance();
+                } else {
                     break;
                 }
             }
-            let end_token = self.previous();
-            return Ok(Expr::Call(Box::new(expr), end_token, arguments));
         }
-        Ok(expr)
+        let end_token = self.peek_token();
+        self.consume_next_token(TokenType::RightParen, "Expect ')' after function call")?;
+        Ok(Expr::Call(Box::new(expr), end_token, arguments))
     }
 
     fn primary(&mut self) -> Result<Expr> {
@@ -493,6 +534,10 @@ impl<'a> Parser<'a> {
                 let expr = self.expression()?;
                 self.consume_next_token(TokenType::RightParen, "Expected ')' after  expression")
                     .map(|_| Ok(Expr::Grouping(Box::new(expr))))?
+            }
+            TokenType::This => {
+                self.advance();
+                Ok(Expr::This(self.previous()))
             }
             _ => {
                 bail!(parse_error(&t, "Expect expression"))
@@ -862,6 +907,34 @@ mod tests {
         let statements = parser.parse()?;
         assert_eq!(
             "Fun declaration[test_function([Token { token_type: Identifier, lexeme: \"a\", line: 4, literal: Some(Identifier(\"a\")) }, Token { token_type: Identifier, lexeme: \"b\", line: 4, literal: Some(Identifier(\"b\")) }]) [[Print(Binary(Var(Token { token_type: Identifier, lexeme: \"a\", line: 5, literal: Some(Identifier(\"a\")) }), Token { token_type: Plus, lexeme: \"+\", line: 5, literal: None }, Var(Token { token_type: Identifier, lexeme: \"b\", line: 5, literal: Some(Identifier(\"b\")) })))]]], (Fun call [(Var test_function)([Literal(Some(String(\"hello\"))), Literal(Some(String(\"world\")))])])",
+            statements
+                .into_iter()
+                .map(|s| s.to_string())
+                .collect::<Vec<String>>()
+                .join(", ")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn parses_ast_correctly_class_declaration() -> Result<()> {
+        let mut scanner = Scanner::new(
+            r#"
+            class Bacon {
+                eat() {
+                  print "Crunch crunch crunch!";
+                }
+              }
+              
+            Bacon().eat();
+        "#
+            .into(),
+        );
+        let tokens = scanner.scan_tokens()?;
+        let mut parser = Parser::new(tokens);
+        let statements = parser.parse()?;
+        assert_eq!(
+            "Class declaration Token { token_type: Identifier, lexeme: \"Bacon\", line: 2, literal: Some(Identifier(\"Bacon\")) }[[Function(Token { token_type: Identifier, lexeme: \"eat\", line: 3, literal: Some(Identifier(\"eat\")) }, [], [Print(Literal(Some(String(\"Crunch crunch crunch!\"))))])]], (Fun call [(Get[(Fun call [(Var Bacon)([])]).type Identifier lexeme eat literal Some(Identifier(\"eat\"))])([])])",
             statements
                 .into_iter()
                 .map(|s| s.to_string())

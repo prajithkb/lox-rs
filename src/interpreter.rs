@@ -19,7 +19,8 @@ pub enum Value {
     Boolean(bool),
     Number(f64),
     String(String),
-    Function(LoxFunction),
+    Function(Rc<LoxFunction>),
+    Instance(Rc<LoxFunction>, Shared<HashMap<String, Value>>),
     // Special value for returning, to unwind the stack
     __Return(Box<Value>),
 }
@@ -32,6 +33,7 @@ impl Display for Value {
             Value::Number(n) => f.write_str(&n.to_string()),
             Value::String(s) => f.write_str(s),
             Value::Function(callable) => f.write_fmt(format_args!("fn {:?}", callable)),
+            Value::Instance(class, _) => f.write_fmt(format_args!("Class {:?}", class)),
             Value::__Return(v) => f.write_fmt(format_args!("Return {:?}", v)),
         }
     }
@@ -46,6 +48,12 @@ pub enum LoxFunction {
         Shared<Environment>,
     ),
     UserDefined(String, Vec<String>, Rc<Vec<Stmt>>, Shared<Environment>),
+    Class(
+        String,
+        Vec<String>,
+        HashMap<String, Rc<LoxFunction>>,
+        Shared<Environment>,
+    ),
 }
 
 impl Debug for LoxFunction {
@@ -53,6 +61,7 @@ impl Debug for LoxFunction {
         match self {
             Self::Native(arg0, _, _, _) => f.debug_tuple("Native").field(arg0).finish(),
             Self::UserDefined(arg0, _, _, _) => f.debug_tuple("UserDefined").field(arg0).finish(),
+            Self::Class(arg0, _, _, _) => f.debug_tuple("Class").field(arg0).finish(),
         }
     }
 }
@@ -180,7 +189,7 @@ impl<'a> Interpreter<'a> {
         };
         interpreter.environment().define(
             "clock".into(),
-            Value::Function(LoxFunction::Native(
+            Value::Function(Rc::new(LoxFunction::Native(
                 "clock".into(),
                 vec![],
                 Rc::new(RefCell::new(NativeFunction::new(
@@ -188,7 +197,7 @@ impl<'a> Interpreter<'a> {
                     Interpreter::clock(),
                 ))),
                 globals,
-            )),
+            ))),
         );
         interpreter
     }
@@ -225,7 +234,39 @@ impl<'a> Interpreter<'a> {
                 .function_declaration(name, parameters, body.clone())
                 .map(|_| Ok(Value::Nil))?,
             Stmt::Return(_, expr) => self.return_statement(expr),
+            Stmt::Class(name, methods) => self.class_declaration(name, methods.clone()),
         }
+    }
+
+    fn class_declaration(&mut self, name: &Token, methods: Rc<Vec<Stmt>>) -> Result<Value> {
+        self.environment().define(name.lexeme.clone(), Value::Nil);
+        let closure = Rc::new(RefCell::new(Environment::new(Some(
+            self.environment.clone(),
+        ))));
+        let mut functions = HashMap::new();
+        let mut constructor_params = vec![];
+        for method in methods.iter() {
+            if let Stmt::Function(name, params, body) = method {
+                let parameter_names: Vec<String> =
+                    params.iter().map(|p| p.lexeme.clone()).collect();
+                if name.lexeme == "init" {
+                    constructor_params = parameter_names.clone();
+                }
+                let function = LoxFunction::UserDefined(
+                    name.lexeme.clone(),
+                    parameter_names,
+                    body.clone(),
+                    closure.clone(),
+                );
+                functions.insert(name.lexeme.clone(), Rc::new(function));
+            } else {
+                bail!(runtime_error_with_token("Invalid expression/statement in class declaration. Should have been caught in resolver!".into(), name))
+            }
+        }
+        let class = LoxFunction::Class(name.lexeme.clone(), constructor_params, functions, closure);
+        self.environment()
+            .assign(&name.lexeme, Value::Function(Rc::new(class)));
+        Ok(Value::Nil)
     }
 
     fn return_statement(&mut self, expr: &Option<Box<Expr>>) -> Result<Value> {
@@ -248,12 +289,12 @@ impl<'a> Interpreter<'a> {
         let parameter_names: Vec<String> = parameters.iter().map(|p| p.lexeme.clone()).collect();
         self.environment().define(
             function_name,
-            Value::Function(LoxFunction::UserDefined(
+            Value::Function(Rc::new(LoxFunction::UserDefined(
                 name.lexeme.clone(),
                 parameter_names,
                 body,
                 closure,
-            )),
+            ))),
         );
         Ok(())
     }
@@ -365,6 +406,96 @@ impl<'a> Interpreter<'a> {
             Expr::Assign(name, expr) => self.evaluate_assignment(name, expr),
             Expr::Logical(left, operator, right) => self.evaluate_logical(left, operator, right),
             Expr::Call(expr, call_paren, arguments) => self.call(expr, call_paren, arguments),
+            Expr::Get(object, property) => self.evaluate_get(object, property),
+            Expr::Set(object, property, value) => self.evaluate_set(object, property, value),
+            Expr::This(keyword) => self.evaluate_this(keyword, expr),
+        }
+    }
+
+    fn evaluate_this(&mut self, keyword: &Token, expr: &Expr) -> Result<Value> {
+        self.evaluate_var(keyword, expr)
+    }
+
+    fn evaluate_set(
+        &mut self,
+        object_expr: &Expr,
+        property: &Token,
+        value_expr: &Expr,
+    ) -> Result<Value> {
+        let object = self.evaluate(object_expr)?;
+        if let Value::Instance(_, properties) = object {
+            let v = self.evaluate(value_expr)?;
+            (&*properties)
+                .borrow_mut()
+                .insert(property.lexeme.clone(), v);
+            Ok(Value::Nil)
+        } else {
+            bail!(runtime_error_with_token(
+                "Cannot call '.' operator non class instances".to_string(),
+                property
+            ))
+        }
+    }
+
+    fn evaluate_get(&mut self, expr: &Expr, property: &Token) -> Result<Value> {
+        let object = self.evaluate(expr)?;
+        if let Value::Instance(class, properties) = object.clone() {
+            if let Some(v) = (&*properties).borrow_mut().get(&property.lexeme) {
+                Ok(v.clone())
+            } else {
+                let method = match &*class {
+                    LoxFunction::Class(_, _params, methods, _) => methods.get(&property.lexeme),
+                    _ => None,
+                };
+                if let Some(m) = method {
+                    Ok(Value::Function(Rc::new(
+                        self.bind_method(m, object, property, &class)?,
+                    )))
+                } else {
+                    bail!(runtime_error_with_token(
+                        format!(
+                            "Undefined property {} for class {:?}",
+                            property.lexeme, class
+                        ),
+                        property
+                    ))
+                }
+            }
+        } else {
+            bail!(runtime_error_with_token(
+                "Cannot call '.' operator non class instances".to_string(),
+                property
+            ))
+        }
+    }
+
+    fn bind_method(
+        &mut self,
+        method: &Rc<LoxFunction>,
+        object_to_bind_to: Value,
+        token: &Token,
+        class: &LoxFunction,
+    ) -> Result<LoxFunction> {
+        match &**method {
+            LoxFunction::UserDefined(name, arguments, body, closure) => {
+                let environment = Rc::new(RefCell::new(Environment::new(Some(closure.clone()))));
+                environment
+                    .borrow_mut()
+                    .define("this".to_string(), object_to_bind_to);
+                Ok(LoxFunction::UserDefined(
+                    name.clone(),
+                    arguments.clone(),
+                    body.clone(),
+                    environment,
+                ))
+            }
+            _ => bail!(runtime_error_with_token(
+                format!(
+                    "Invalid function type {} for class {:?}",
+                    token.lexeme, class
+                ),
+                token
+            )),
         }
     }
 
@@ -487,61 +618,31 @@ impl<'a> Interpreter<'a> {
 
     fn call(&mut self, expr: &Expr, left_paren: &Token, arguments: &[Expr]) -> Result<Value> {
         if let Value::Function(lox_function) = self.evaluate(expr)? {
-            match lox_function {
-                LoxFunction::UserDefined(name, parameters, body, closure) => {
-                    if parameters.len() != arguments.len() {
-                        bail!(runtime_error_with_token(
-                            format!(
-                                "function {} expects {} arguments but got {}",
-                                name,
-                                parameters.len(),
-                                arguments.len()
-                            ),
-                            left_paren
-                        ))
-                    }
-                    let mut evaluated_arguments = vec![];
-                    for argument in arguments {
-                        let evaluated_argument = self.evaluate(argument)?;
-                        // dbg!(argument, &evaluated_argument);
-                        evaluated_arguments.push(evaluated_argument);
-                    }
-                    let function_env = Rc::new(RefCell::new(Environment::new(Some(closure))));
-                    for (i, arg) in evaluated_arguments.into_iter().enumerate() {
-                        let mut e = (*function_env).borrow_mut();
-                        e.define(parameters[i].clone(), arg);
-                    }
-                    if let Value::__Return(v) = self.block_with_env(body.as_ref(), function_env)? {
-                        Ok(*v)
-                    } else {
-                        Ok(Value::Nil)
-                    }
-                }
-                LoxFunction::Native(name, parameters, native_function, closure) => {
-                    if parameters.len() != arguments.len() {
-                        bail!(runtime_error_with_token(
-                            format!(
-                                "function {} expects {} arguments but got {}",
-                                name,
-                                parameters.len(),
-                                arguments.len()
-                            ),
-                            left_paren
-                        ))
-                    }
-                    let mut evaluated_arguments = vec![];
-                    for argument in arguments {
-                        let evaluated_argument = self.evaluate(argument)?;
-                        evaluated_arguments.push(evaluated_argument);
-                    }
-                    let function_env = closure;
-                    for (i, arg) in evaluated_arguments.clone().into_iter().enumerate() {
-                        let mut e = (*function_env).borrow_mut();
-                        e.define(parameters[i].clone(), arg);
-                    }
-                    let native_call = &mut (*native_function).borrow_mut().inner;
-                    Ok(native_call(evaluated_arguments, function_env))
-                }
+            match &*lox_function {
+                LoxFunction::UserDefined(name, parameters, body, closure) => self.user_defined_fn(
+                    name,
+                    parameters,
+                    body,
+                    closure.clone(),
+                    arguments,
+                    left_paren,
+                ),
+                LoxFunction::Native(name, parameters, native_function, closure) => self.native_fn(
+                    name,
+                    parameters,
+                    closure.clone(),
+                    arguments,
+                    native_function,
+                    left_paren,
+                ),
+                LoxFunction::Class(name, parameters, methods, _closure) => self.instance_creation(
+                    name,
+                    parameters,
+                    methods,
+                    arguments,
+                    left_paren,
+                    lox_function.clone(),
+                ),
             }
         } else {
             bail!(runtime_error_with_token(
@@ -549,6 +650,113 @@ impl<'a> Interpreter<'a> {
                 left_paren
             ))
         }
+    }
+
+    fn user_defined_fn(
+        &mut self,
+        name: &str,
+        parameters: &[String],
+        body: &[Stmt],
+        closure: Shared<Environment>,
+        arguments: &[Expr],
+        left_paren: &Token,
+    ) -> Result<Value> {
+        if parameters.len() != arguments.len() {
+            bail!(runtime_error_with_token(
+                format!(
+                    "function {} expects {} arguments but got {}",
+                    name,
+                    parameters.len(),
+                    arguments.len()
+                ),
+                left_paren
+            ))
+        }
+        let mut evaluated_arguments = vec![];
+        for argument in arguments {
+            let evaluated_argument = self.evaluate(argument)?;
+            evaluated_arguments.push(evaluated_argument);
+        }
+        let function_env = Rc::new(RefCell::new(Environment::new(Some(closure))));
+        for (i, arg) in evaluated_arguments.into_iter().enumerate() {
+            let mut e = (*function_env).borrow_mut();
+            e.define(parameters[i].clone(), arg);
+        }
+        if let Value::__Return(v) = self.block_with_env(body.as_ref(), function_env)? {
+            Ok(*v)
+        } else {
+            Ok(Value::Nil)
+        }
+    }
+
+    fn native_fn(
+        &mut self,
+        name: &str,
+        parameters: &[String],
+        closure: Shared<Environment>,
+        arguments: &[Expr],
+        native_function: &Shared<NativeFunction>,
+        left_paren: &Token,
+    ) -> Result<Value> {
+        if parameters.len() != arguments.len() {
+            bail!(runtime_error_with_token(
+                format!(
+                    "function {} expects {} arguments but got {}",
+                    name,
+                    parameters.len(),
+                    arguments.len()
+                ),
+                left_paren
+            ))
+        }
+        let mut evaluated_arguments = vec![];
+        for argument in arguments {
+            let evaluated_argument = self.evaluate(argument)?;
+            evaluated_arguments.push(evaluated_argument);
+        }
+        let function_env = Rc::new(RefCell::new(Environment::new(Some(closure))));
+        for (i, arg) in evaluated_arguments.clone().into_iter().enumerate() {
+            let mut e = (*function_env).borrow_mut();
+            e.define(parameters[i].clone(), arg);
+        }
+        let native_call = &mut (*native_function).borrow_mut().inner;
+        Ok(native_call(evaluated_arguments, function_env))
+    }
+
+    fn instance_creation(
+        &mut self,
+        name: &str,
+        parameters: &[String],
+        methods: &HashMap<String, Rc<LoxFunction>>,
+        arguments: &[Expr],
+        left_paren: &Token,
+        class: Rc<LoxFunction>,
+    ) -> Result<Value> {
+        if parameters.len() != arguments.len() {
+            bail!(runtime_error_with_token(
+                format!(
+                    "Class constructor for {} expects {} arguments but got {}",
+                    name,
+                    parameters.len(),
+                    arguments.len()
+                ),
+                left_paren
+            ))
+        }
+        let instance = Value::Instance(class.clone(), Rc::new(RefCell::new(HashMap::new())));
+        if let Some(init) = methods.get("init") {
+            if let LoxFunction::UserDefined(name, parameters, body, closure) =
+                self.bind_method(init, instance.clone(), left_paren, &class)?
+            {
+                self.user_defined_fn(&name, &parameters, &body, closure, arguments, left_paren)?;
+            } else {
+                bail!(runtime_error_with_token(
+                    format!("Invalid constructor method {:?} for class {}", init, name),
+                    left_paren
+                ))
+            }
+        }
+        Ok(instance)
     }
 }
 
@@ -1162,6 +1370,149 @@ outer variable set to inner variable
             "0\n1\n1\n2\n3\n5\n8\n13\n21\n34\n55\n89\n144\n233\n377\n610\n987\n1597\n2584\n4181\n",
             output
         );
+        Ok(())
+    }
+
+    #[test]
+    fn class_with_behaviour() -> Result<()> {
+        let mut scanner = Scanner::new(
+            r#"
+            // Fibonacci
+            class Bacon {
+                eat() {
+                  print "Crunch crunch crunch!";
+                }
+                eat_quietly() {
+                    print "mm mmm mmm!";
+                }
+              }
+              Bacon().eat();
+              var eater = Bacon();
+              eater.eat();
+              eater.eat_quietly();
+        "#
+            .into(),
+        );
+        let tokens = scanner.scan_tokens()?;
+        let mut parser = Parser::new(tokens);
+        let statements = parser.parse()?;
+        let mut resolver = Resolver::new();
+        let locals = resolver.resolve(&statements)?;
+        let mut buf = vec![];
+        let mut interpreter = Interpreter::new_with_writer(Some(&mut buf));
+        interpreter.interpret(&statements, locals)?;
+        let output = utf8_to_string(&buf);
+        assert_eq!(
+            "Crunch crunch crunch!\nCrunch crunch crunch!\nmm mmm mmm!\n",
+            output
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn class_with_state() -> Result<()> {
+        let mut scanner = Scanner::new(
+            r#"
+            class Cake {
+              }
+              
+              var cake = Cake();
+              cake.flavor = "German chocolate";
+              print cake.flavor;
+        "#
+            .into(),
+        );
+        let tokens = scanner.scan_tokens()?;
+        let mut parser = Parser::new(tokens);
+        let statements = parser.parse()?;
+        let mut resolver = Resolver::new();
+        let locals = resolver.resolve(&statements)?;
+        let mut buf = vec![];
+        let mut interpreter = Interpreter::new_with_writer(Some(&mut buf));
+        interpreter.interpret(&statements, locals)?;
+        let output = utf8_to_string(&buf);
+        assert_eq!("German chocolate\n", output);
+        Ok(())
+    }
+
+    #[test]
+    fn class_with_state_and_behaviour() -> Result<()> {
+        let mut scanner = Scanner::new(
+            r#"
+            class Cake {
+                taste() {
+                  var adjective = "delicious";
+                  print "The " + this.flavor + " cake is " + adjective + "!";
+                }
+              }
+              
+              var cake = Cake();
+              cake.flavor = "German chocolate";
+              cake.taste(); 
+        "#
+            .into(),
+        );
+        let tokens = scanner.scan_tokens()?;
+        let mut parser = Parser::new(tokens);
+        let statements = parser.parse()?;
+        let mut resolver = Resolver::new();
+        let locals = resolver.resolve(&statements)?;
+        let mut buf = vec![];
+        let mut interpreter = Interpreter::new_with_writer(Some(&mut buf));
+        interpreter.interpret(&statements, locals)?;
+        let output = utf8_to_string(&buf);
+        assert_eq!("The German chocolate cake is delicious!\n", output);
+        Ok(())
+    }
+
+    #[test]
+    fn class_with_state_and_behaviour_and_constructor() -> Result<()> {
+        let mut scanner = Scanner::new(
+            r#"
+            class Cake {
+    
+                init(type) {
+                    this.type = type;
+                }
+            
+                taste() {
+                    this.inner_taste();
+                    this.flavor = "Belgian chocolate";
+                }
+            
+                 taste_again() {
+                    this.inner_taste();
+                }
+            
+                inner_taste() {
+                    var adjective = "delicious";
+                    print "The " + this.flavor + " " + this.type + " is " + adjective + "!";
+                }
+            }
+            
+            var cake = Cake("cake");
+            cake.flavor = "German chocolate";
+            cake.taste();
+            cake.taste_again(); 
+            
+            
+            var cake = Cake("cookie");
+            cake.flavor = "German chocolate";
+            cake.taste();
+            cake.taste_again();  
+        "#
+            .into(),
+        );
+        let tokens = scanner.scan_tokens()?;
+        let mut parser = Parser::new(tokens);
+        let statements = parser.parse()?;
+        let mut resolver = Resolver::new();
+        let locals = resolver.resolve(&statements)?;
+        let mut buf = vec![];
+        let mut interpreter = Interpreter::new_with_writer(Some(&mut buf));
+        interpreter.interpret(&statements, locals)?;
+        let output = utf8_to_string(&buf);
+        assert_eq!("The German chocolate cake is delicious!\nThe Belgian chocolate cake is delicious!\nThe German chocolate cookie is delicious!\nThe Belgian chocolate cookie is delicious!\n", output);
         Ok(())
     }
 
