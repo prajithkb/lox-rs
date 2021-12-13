@@ -57,27 +57,28 @@ impl VirtualMachine {
             })?;
             trace!("VM Internal state: {:?}, {:?}", instruction, self);
             match instruction {
-                Opcode::OpConstant => {
+                Opcode::Constant => {
                     let constant = self.read_constant();
                     self.push(constant);
                 }
-                Opcode::OpReturn => {
+                Opcode::Return => {
                     print_value(self.pop());
                     println!();
                     return Ok(());
                 }
-                Opcode::OpNegate => {
+                Opcode::Negate => {
                     let v = self.pop();
                     self.push(-v)
                 }
-                Opcode::OpAdd => self.binary_op(|a, b| a + b),
-                Opcode::OpSubtract => self.binary_op(|a, b| a - b),
-                Opcode::OpMultiply => self.binary_op(|a, b| a * b),
-                Opcode::OpDivide => self.binary_op(|a, b| a / b),
+                Opcode::Add => self.binary_op(|a, b| a + b),
+                Opcode::Subtract => self.binary_op(|a, b| a - b),
+                Opcode::Multiply => self.binary_op(|a, b| a * b),
+                Opcode::Divide => self.binary_op(|a, b| a / b),
             }
         }
     }
 
+    #[inline]
     fn binary_op(&mut self, op: fn(Value, Value) -> Value) {
         let right = self.pop();
         let left = self.pop();
@@ -124,24 +125,25 @@ pub fn vm_main() -> Result<()> {
 
     // -((1.2 + 3.4)/5.6)
     let constant = chunk.add_constant(1.2);
-    chunk.write_chunk(Opcode::OpConstant.into(), 123);
+    chunk.write_chunk(Opcode::Constant.into(), 123);
     chunk.write_chunk(constant as u8, 123);
 
     let constant = chunk.add_constant(3.4);
-    chunk.write_chunk(Opcode::OpConstant.into(), 123);
+    chunk.write_chunk(Opcode::Constant.into(), 123);
     chunk.write_chunk(constant as u8, 123);
 
-    chunk.write_chunk(Opcode::OpAdd.into(), 123);
+    chunk.write_chunk(Opcode::Add.into(), 123);
 
     let constant = chunk.add_constant(5.6);
-    chunk.write_chunk(Opcode::OpConstant.into(), 123);
+    chunk.write_chunk(Opcode::Constant.into(), 123);
     chunk.write_chunk(constant as u8, 123);
 
-    chunk.write_chunk(Opcode::OpDivide.into(), 123);
+    chunk.write_chunk(Opcode::Divide.into(), 123);
 
-    chunk.write_chunk(Opcode::OpNegate.into(), 123);
+    chunk.write_chunk(Opcode::Negate.into(), 123);
 
-    chunk.write_chunk(Opcode::OpReturn.into(), 123);
+    chunk.write_chunk(Opcode::Return.into(), 123);
+    chunk.disassemble_chunk("test chunk");
     let mut vm = VirtualMachine::new(chunk);
     vm.interpret()?;
     vm.free();

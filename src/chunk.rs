@@ -1,4 +1,4 @@
-use std::convert::TryFrom;
+use std::{convert::TryFrom, fmt::Display};
 
 use crate::instructions::{constant_instruction, simple_instruction};
 use num_enum::{IntoPrimitive, TryFromPrimitive};
@@ -6,13 +6,19 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 #[derive(Debug, PartialEq, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
 #[repr(u8)]
 pub enum Opcode {
-    OpConstant,
-    OpReturn,
-    OpAdd,
-    OpSubtract,
-    OpMultiply,
-    OpDivide,
-    OpNegate,
+    Constant,
+    Return,
+    Add,
+    Subtract,
+    Multiply,
+    Divide,
+    Negate,
+}
+
+impl Display for Opcode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_fmt(format_args!("OpCode[{:?}]", self))
+    }
 }
 
 pub type Value = f64;
@@ -46,7 +52,7 @@ impl Chunk {
         self.constants.count - 1
     }
 
-    // #[inline]
+    #[inline]
     pub fn read_constant(&mut self) -> Value {
         let offset = self.code.read_and_increment();
         self.constants.read_item_at(offset as usize)
@@ -71,8 +77,8 @@ impl Chunk {
 
         match Opcode::try_from(byte) {
             Ok(instruction) => match instruction {
-                Opcode::OpConstant => constant_instruction("OP_CONSTANT", self, offset),
-                _ => simple_instruction(&format!("{:?}", instruction), offset),
+                Opcode::Constant => constant_instruction(&instruction.to_string(), self, offset),
+                _ => simple_instruction(&instruction.to_string(), offset),
             },
             Err(e) => {
                 eprintln!(
@@ -122,15 +128,10 @@ impl<T: Copy> Memory<T> {
         }
     }
 
-    // #[inline]
+    #[inline]
     pub fn write_item(&mut self, byte: T) {
         self.inner.push(byte);
         self.count += 1;
-    }
-
-    pub fn free_items(&mut self) {
-        self.inner.clear();
-        self.count = 0;
     }
 
     #[inline]
@@ -147,14 +148,15 @@ impl<T: Copy> Memory<T> {
         self.inner[self.current_index]
     }
 
+    #[inline]
     pub fn read_and_increment(&mut self) -> T {
         let v = self.read();
         self.current_index += 1;
         v
     }
 
-    // #[inline]
-    pub fn count_as_mut(&mut self) -> &mut usize {
-        &mut self.count
+    pub fn free_items(&mut self) {
+        self.inner.clear();
+        self.count = 0;
     }
 }
