@@ -5,6 +5,7 @@ mod errors {
     // Create the Error, ErrorKind, ResultExt, and Result types
     error_chain! {
         errors {
+            // Interpreter errors
             ScanError(message: String) {
                 description("Scan Error")
                 display("Scan Error: {}", message)
@@ -20,6 +21,11 @@ mod errors {
             RuntimeError(message: String) {
                 description("Runtime Error")
                 display("Runtime Error: {}", message)
+            }
+            //
+            VMRuntimeError(message: String) {
+                description("VM Runtime Error")
+                display("VM Runtime Error: {}", message)
             }
         }
 

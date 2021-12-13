@@ -6,9 +6,9 @@ pub fn simple_instruction(name: &str, offset: usize) -> usize {
 }
 
 pub fn constant_instruction(name: &str, chunk: &Chunk, offset: usize) -> usize {
-    let constant = chunk.code.item_at(offset + 1);
+    let constant = chunk.code.read_item_at(offset + 1);
     print!("{:<16} {:4} '", name, constant);
-    print_value(chunk.constants.item_at(constant as usize));
+    print_value(chunk.constants.read_item_at(constant as usize));
     println!("'");
     offset + 2
 }

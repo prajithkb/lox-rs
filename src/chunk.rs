@@ -1,27 +1,18 @@
+use std::convert::TryFrom;
+
 use crate::instructions::{constant_instruction, simple_instruction};
+use num_enum::{IntoPrimitive, TryFromPrimitive};
 
+#[derive(Debug, PartialEq, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
 #[repr(u8)]
-#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum Opcode {
-    Invalid = 255,
-    OpConstant = 0,
-    OpReturn = 1,
-}
-
-impl Opcode {
-    pub fn as_u8(&self) -> u8 {
-        *self as u8
-    }
-}
-
-impl From<u8> for Opcode {
-    fn from(byte: u8) -> Self {
-        match byte {
-            0 => Opcode::OpConstant,
-            1 => Opcode::OpReturn,
-            _ => Opcode::Invalid,
-        }
-    }
+    OpConstant,
+    OpReturn,
+    OpAdd,
+    OpSubtract,
+    OpMultiply,
+    OpDivide,
+    OpNegate,
 }
 
 pub type Value = f64;
@@ -55,9 +46,14 @@ impl Chunk {
         self.constants.count - 1
     }
 
+    // #[inline]
+    pub fn read_constant(&mut self) -> Value {
+        let offset = self.code.read_and_increment();
+        self.constants.read_item_at(offset as usize)
+    }
+
     pub fn disassemble_chunk(&self, name: &str) {
         println!("== {} ==", name);
-        println!("addr ");
         let mut offset = 0;
         while offset < self.code.count {
             offset = self.disassemble_instruction(offset);
@@ -71,12 +67,18 @@ impl Chunk {
         } else {
             print!("{:04} ", self.lines[offset]);
         }
-        let instruction: Opcode = self.code.item_at(offset).into();
-        match instruction {
-            Opcode::OpReturn => simple_instruction("OP_RETURN", offset),
-            Opcode::OpConstant => constant_instruction("OP_CONSTANT", self, offset),
-            Opcode::Invalid => {
-                eprintln!("Invalid instruction {:?}[value={}]", instruction, offset);
+        let byte = self.code.read_item_at(offset);
+
+        match Opcode::try_from(byte) {
+            Ok(instruction) => match instruction {
+                Opcode::OpConstant => constant_instruction("OP_CONSTANT", self, offset),
+                _ => simple_instruction(&format!("{:?}", instruction), offset),
+            },
+            Err(e) => {
+                eprintln!(
+                    "Invalid instruction {:?}[value={}], error: {}",
+                    byte, offset, e
+                );
                 offset + 1
             }
         }
@@ -97,13 +99,17 @@ impl Chunk {
         self.free_code();
         self.free_data();
     }
+
+    pub fn current_line(&self) -> usize {
+        self.lines[self.code.current_index]
+    }
 }
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Memory<T: Copy> {
     inner: Vec<T>,
-    count: usize,
-    capacity: usize,
+    pub count: usize,
+    pub current_index: usize,
 }
 
 impl<T: Copy> Memory<T> {
@@ -112,24 +118,43 @@ impl<T: Copy> Memory<T> {
         Memory {
             inner: vec![],
             count: 0,
-            capacity: 0,
+            current_index: 0,
         }
     }
 
+    // #[inline]
     pub fn write_item(&mut self, byte: T) {
         self.inner.push(byte);
         self.count += 1;
-        if self.count > self.capacity {
-            self.capacity *= 2;
-        }
     }
 
     pub fn free_items(&mut self) {
         self.inner.clear();
         self.count = 0;
-        self.capacity = 0;
     }
-    pub fn item_at(&self, index: usize) -> T {
+
+    #[inline]
+    pub fn set_current_index(&mut self, index: usize) {
+        self.current_index = index
+    }
+    #[inline]
+    pub fn read_item_at(&self, index: usize) -> T {
         self.inner[index]
+    }
+
+    #[inline]
+    pub fn read(&self) -> T {
+        self.inner[self.current_index]
+    }
+
+    pub fn read_and_increment(&mut self) -> T {
+        let v = self.read();
+        self.current_index += 1;
+        v
+    }
+
+    // #[inline]
+    pub fn count_as_mut(&mut self) -> &mut usize {
+        &mut self.count
     }
 }
