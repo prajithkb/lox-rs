@@ -9,9 +9,7 @@ fn main() -> Result<()> {
     match args.len() {
         2 => match args[1].as_str() {
             "interpreter" => lox.run_prompt()?,
-            "vm" => {
-                todo!()
-            }
+            "vm" => vm::vm_main()?,
             _ => print_help(),
         },
         3 => match args[1].as_str() {

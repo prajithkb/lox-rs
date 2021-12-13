@@ -36,3 +36,7 @@ mod parser;
 mod resolver;
 mod scanner;
 mod tokens;
+
+pub mod chunk;
+mod instructions;
+pub mod vm;
