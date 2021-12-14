@@ -37,7 +37,7 @@ mod errors {
 pub use errors::*;
 
 mod interpreter;
-pub mod lox_interpreter;
+pub mod lox;
 mod parser;
 mod resolver;
 mod scanner;

@@ -13,14 +13,17 @@ pub struct VirtualMachine {
 }
 
 impl VirtualMachine {
-    pub fn new(mut chunk: Chunk) -> Self {
-        chunk.code.set_current_index(0);
+    #[allow(clippy::new_without_default)]
+    pub fn new() -> Self {
         VirtualMachine {
-            chunk,
+            chunk: Chunk::default(),
             stack: Vec::new(),
         }
     }
-    pub fn interpret(&mut self) -> Result<()> {
+
+    pub fn interpret(&mut self, chunk: Chunk) -> Result<()> {
+        self.chunk = chunk;
+        self.chunk.code.set_current_index(0);
         self.run()
     }
     // #[inline]
@@ -120,6 +123,10 @@ fn runtime_vm_error(line: usize, message: &str) -> ErrorKind {
     ErrorKind::VMRuntimeError(format!("Line: {}, message: {}", line, message))
 }
 
+// fn repl() -> Result<()> {}
+
+// fn run_script(path: &str) -> Result<()> {}
+
 pub fn vm_main() -> Result<()> {
     let mut chunk = Chunk::new();
 
@@ -144,8 +151,8 @@ pub fn vm_main() -> Result<()> {
 
     chunk.write_chunk(Opcode::Return.into(), 123);
     chunk.disassemble_chunk("test chunk");
-    let mut vm = VirtualMachine::new(chunk);
-    vm.interpret()?;
+    let mut vm = VirtualMachine::new();
+    vm.interpret(chunk)?;
     vm.free();
     Ok(())
 }

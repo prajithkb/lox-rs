@@ -1,6 +1,6 @@
 use std::env;
 
-use lox_rs::lox_interpreter::Lox;
+use lox_rs::lox::Lox;
 use lox_rs::*;
 fn main() -> Result<()> {
     env_logger::init();
@@ -8,15 +8,13 @@ fn main() -> Result<()> {
     let mut lox = Lox::new();
     match args.len() {
         2 => match args[1].as_str() {
-            "interpreter" => lox.run_prompt()?,
-            "vm" => vm::vm_main()?,
+            "interpreter" => lox.run_prompt(lox::LoxRunType::Interpreter)?,
+            "vm" => lox.run_prompt(lox::LoxRunType::VirtualMachine)?,
             _ => print_help(),
         },
         3 => match args[1].as_str() {
-            "interpreter" => lox.run_script_with_exit_code(&args[2]),
-            "vm" => {
-                todo!()
-            }
+            "interpreter" => lox.run_script_with_exit_code(&args[2], lox::LoxRunType::Interpreter),
+            "vm" => lox.run_script_with_exit_code(&args[2], lox::LoxRunType::VirtualMachine),
             _ => print_help(),
         },
         _ => {

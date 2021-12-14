@@ -4,7 +4,7 @@ use log::debug;
 
 use crate::{
     errors::*,
-    lox_interpreter::{report_error, report_error_with_line},
+    lox::{report_error, report_error_with_line},
     tokens::{Literal, Token, TokenType},
 };
 

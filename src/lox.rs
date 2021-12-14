@@ -8,11 +8,22 @@ use std::{
 use log::{debug, info};
 
 use crate::{
-    errors::*, interpreter::Interpreter, parser::Parser, resolver::Resolver, scanner::Scanner,
+    errors::*,
+    interpreter::Interpreter,
+    parser::Parser,
+    resolver::Resolver,
+    scanner::Scanner,
+    vm::{self, VirtualMachine},
 };
 pub struct Lox<'a> {
     error: Option<LoxError>,
     interpreter: Interpreter<'a>,
+    vm: VirtualMachine,
+}
+#[derive(Clone)]
+pub enum LoxRunType {
+    Interpreter,
+    VirtualMachine,
 }
 
 #[derive(Debug)]
@@ -27,10 +38,11 @@ impl<'a> Lox<'a> {
         Lox {
             error: None,
             interpreter: Interpreter::new(),
+            vm: VirtualMachine::new(),
         }
     }
 
-    pub fn run_script(&mut self, script: &str) -> Result<()> {
+    pub fn run_script(&mut self, script: &str, run_type: LoxRunType) -> Result<()> {
         let mut script = File::open(script).chain_err(|| "Unable to create file")?;
         let mut script_contents = String::new();
         if script
@@ -38,13 +50,16 @@ impl<'a> Lox<'a> {
             .chain_err(|| "Unable to read file")?
             > 0
         {
-            self.run(script_contents)?;
+            match run_type {
+                LoxRunType::Interpreter => self.run_interpreter(script_contents)?,
+                LoxRunType::VirtualMachine => self.run_vm(script_contents)?,
+            };
         }
         Ok(())
     }
 
-    pub fn run_script_with_exit_code(&mut self, script: &str) {
-        match self.run_script(script) {
+    pub fn run_script_with_exit_code(&mut self, script: &str, run_type: LoxRunType) {
+        match self.run_script(script, run_type) {
             Ok(_) => exit(0),
             Err(_) => {
                 if let Some(lox_error) = &self.error {
@@ -57,7 +72,39 @@ impl<'a> Lox<'a> {
         }
     }
 
-    pub fn run(&mut self, content: String) -> Result<()> {
+    pub fn run_vm(&mut self, content: String) -> Result<()> {
+        let mut scanner = Scanner::new(content);
+        let start_time = Instant::now();
+        match scanner.scan_tokens() {
+            Ok(tokens) => {
+                let mut line = 0;
+                // debug!("Created Tokens : {:?}", tokens);
+                for token in tokens {
+                    if token.line != line {
+                        print!("{:04} ", token.line);
+                        line = token.line;
+                    } else {
+                        print!("   | ");
+                    }
+                    println!(
+                        "{:4?} '{:width$}'",
+                        token.token_type,
+                        token.lexeme,
+                        width = token.lexeme.len()
+                    );
+                }
+                info!("Tokens created in {} us", start_time.elapsed().as_micros());
+                vm::vm_main()?;
+                Ok(())
+            }
+            Err(scan_error) => {
+                self.error = Some(LoxError::SyntaxError);
+                Err(scan_error)
+            }
+        }
+    }
+
+    pub fn run_interpreter(&mut self, content: String) -> Result<()> {
         let mut scanner = Scanner::new(content);
         let start_time = Instant::now();
         match scanner.scan_tokens() {
@@ -112,7 +159,7 @@ impl<'a> Lox<'a> {
         }
     }
 
-    pub fn run_prompt(&mut self) -> Result<()> {
+    pub fn run_prompt(&mut self, run_type: LoxRunType) -> Result<()> {
         loop {
             print!("cmd> ");
             io::stdout().flush().chain_err(|| "")?;
@@ -120,7 +167,11 @@ impl<'a> Lox<'a> {
             let bytes = io::stdin()
                 .read_line(&mut line)
                 .chain_err(|| "Unable to read stdin")?;
-            match self.run(line.trim().to_string()) {
+            let result = match run_type {
+                LoxRunType::Interpreter => self.run_interpreter(line.trim().to_string()),
+                LoxRunType::VirtualMachine => self.run_vm(line.trim().to_string()),
+            };
+            match result {
                 Ok(_) => continue,
                 Err(e) => {
                     debug!("Command encountered error [{}], to exit press Ctrl + C", e)
