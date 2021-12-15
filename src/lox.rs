@@ -51,6 +51,7 @@ impl<'a> Lox<'a> {
                 LoxRunType::VirtualMachine => self.run_vm(script_contents)?,
             };
         }
+        self.vm.free();
         Ok(())
     }
 
@@ -151,6 +152,7 @@ impl<'a> Lox<'a> {
                 break;
             }
         }
+        self.vm.free();
         Ok(())
     }
 }

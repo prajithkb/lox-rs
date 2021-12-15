@@ -22,11 +22,6 @@ mod errors {
                 description("Runtime Error")
                 display("Runtime Error: {}", message)
             }
-            //
-            VMRuntimeError(message: String) {
-                description("VM Runtime Error")
-                display("VM Runtime Error: {}", message)
-            }
         }
 
         foreign_links {

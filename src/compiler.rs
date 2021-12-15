@@ -2,8 +2,9 @@ use log::log_enabled;
 use num_enum::{FromPrimitive, IntoPrimitive};
 
 use crate::{
-    chunk::{Chunk, Opcode, Value},
+    chunk::{Chunk, Value},
     errors::*,
+    instructions::Opcode,
     tokens::TokenType,
 };
 
@@ -130,14 +131,49 @@ impl<'a> Compiler<'a> {
                 Some(Compiler::binary),
                 Precedence::Factor,
             ),
-            ParseRule::new(TokenType::Bang, None, None, Precedence::None),
-            ParseRule::new(TokenType::BangEqual, None, None, Precedence::None),
+            ParseRule::new(
+                TokenType::Bang,
+                Some(Compiler::unary),
+                None,
+                Precedence::None,
+            ),
+            ParseRule::new(
+                TokenType::BangEqual,
+                None,
+                Some(Compiler::binary),
+                Precedence::Equality,
+            ),
             ParseRule::new(TokenType::Equal, None, None, Precedence::None),
-            ParseRule::new(TokenType::EqualEqual, None, None, Precedence::None),
-            ParseRule::new(TokenType::Greater, None, None, Precedence::None),
-            ParseRule::new(TokenType::GreaterEqual, None, None, Precedence::None),
-            ParseRule::new(TokenType::Less, None, None, Precedence::None),
-            ParseRule::new(TokenType::LessEqual, None, None, Precedence::None),
+            ParseRule::new(
+                TokenType::EqualEqual,
+                None,
+                Some(Compiler::binary),
+                Precedence::Equality,
+            ),
+            ParseRule::new(
+                TokenType::Greater,
+                None,
+                Some(Compiler::binary),
+                Precedence::Comparison,
+            ),
+            ParseRule::new(
+                TokenType::GreaterEqual,
+                Some(Compiler::binary),
+                None,
+                Precedence::Comparison,
+            ),
+            ParseRule::new(
+                TokenType::Less,
+                None,
+                Some(Compiler::binary),
+                Precedence::Comparison,
+            ),
+            ParseRule::new(
+                TokenType::LessEqual,
+                None,
+                Some(Compiler::binary),
+                Precedence::Comparison,
+            ),
             ParseRule::new(TokenType::Identifier, None, None, Precedence::None),
             ParseRule::new(TokenType::String, None, None, Precedence::None),
             ParseRule::new(
@@ -149,17 +185,32 @@ impl<'a> Compiler<'a> {
             ParseRule::new(TokenType::And, None, None, Precedence::None),
             ParseRule::new(TokenType::Class, None, None, Precedence::None),
             ParseRule::new(TokenType::Else, None, None, Precedence::None),
-            ParseRule::new(TokenType::False, None, None, Precedence::None),
+            ParseRule::new(
+                TokenType::False,
+                Some(Compiler::literal),
+                None,
+                Precedence::None,
+            ),
             ParseRule::new(TokenType::For, None, None, Precedence::None),
             ParseRule::new(TokenType::Fun, None, None, Precedence::None),
             ParseRule::new(TokenType::If, None, None, Precedence::None),
-            ParseRule::new(TokenType::Nil, None, None, Precedence::None),
+            ParseRule::new(
+                TokenType::Nil,
+                Some(Compiler::literal),
+                None,
+                Precedence::None,
+            ),
             ParseRule::new(TokenType::Or, None, None, Precedence::None),
             ParseRule::new(TokenType::Print, None, None, Precedence::None),
             ParseRule::new(TokenType::Return, None, None, Precedence::None),
             ParseRule::new(TokenType::Super, None, None, Precedence::None),
             ParseRule::new(TokenType::This, None, None, Precedence::None),
-            ParseRule::new(TokenType::True, None, None, Precedence::None),
+            ParseRule::new(
+                TokenType::True,
+                Some(Compiler::literal),
+                None,
+                Precedence::None,
+            ),
             ParseRule::new(TokenType::Var, None, None, Precedence::None),
             ParseRule::new(TokenType::While, None, None, Precedence::None),
             ParseRule::new(TokenType::Eof, None, None, Precedence::None),
@@ -196,9 +247,9 @@ impl<'a> Compiler<'a> {
 
     fn number(&mut self) -> Result<()> {
         let str = &self.previous().lexeme;
-        let value: Value = str::parse::<Value>(str)
+        let value = str::parse::<f64>(str)
             .map_err(|_| ErrorKind::ParseError(format!("{} not a number", str)))?;
-        self.emit_constant(value);
+        self.emit_constant(Value::Number(value));
         Ok(())
     }
 
@@ -213,6 +264,7 @@ impl<'a> Compiler<'a> {
         self.parse_precedence(Precedence::Unary)?;
         match token_type {
             TokenType::Minus => self.emit_op_code(Opcode::Negate),
+            TokenType::Bang => self.emit_op_code(Opcode::Not),
             _ => bail!(parse_error(
                 self.previous(),
                 "Cannot perform unary operation."
@@ -232,8 +284,24 @@ impl<'a> Compiler<'a> {
             TokenType::Minus => self.emit_op_code(Opcode::Subtract),
             TokenType::Star => self.emit_op_code(Opcode::Multiply),
             TokenType::Slash => self.emit_op_code(Opcode::Divide),
-            _ => bail!(parse_error(&prev_token, "Invalid operator")),
+            TokenType::BangEqual => self.emit_op_code(Opcode::BangEqual),
+            TokenType::EqualEqual => self.emit_op_code(Opcode::EqualEqual),
+            TokenType::Greater => self.emit_op_code(Opcode::Greater),
+            TokenType::GreaterEqual => self.emit_op_code(Opcode::GreaterEqual),
+            TokenType::Less => self.emit_op_code(Opcode::Less),
+            TokenType::LessEqual => self.emit_op_code(Opcode::LessEqual),
+            _ => bail!(parse_error(&prev_token, "Invalid operator (to be impl?)")),
         }
+        Ok(())
+    }
+
+    fn literal(&mut self) -> Result<()> {
+        match self.previous().token_type {
+            TokenType::Nil => self.emit_op_code(Opcode::Nil),
+            TokenType::True => self.emit_op_code(Opcode::True),
+            TokenType::False => self.emit_op_code(Opcode::False),
+            _ => bail!(parse_error(self.previous(), "Not a literal")),
+        };
         Ok(())
     }
 
@@ -352,7 +420,7 @@ impl<'a> Compiler<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{errors::*, scanner::Scanner, tokens::pretty_print};
+    use crate::{errors::*, scanner::Scanner};
 
     use super::Compiler;
 
@@ -421,7 +489,44 @@ mod tests {
         let mut buf = vec![];
         chunk.disassemble_chunk_with_writer("test", &mut buf);
         assert_eq!(
-            "== test ==\n0000 0001 OpCode[Constant]    0 '4.0'\n0002    | OpCode[Constant]    1 '3.0'\n0004    | OpCode[Constant]    2 '2.0'\n0006    | OpCode[Multiply]\n0007    | OpCode[Subtract]\n0008    | OpCode[Constant]    3 '8.0'\n0010    | OpCode[Constant]    4 '4.0'\n0012    | OpCode[Divide]\n0013    | OpCode[Add]\n0014    | OpCode[Return]\n",utf8_to_string(&buf)
+            r#"== test ==
+0000 0001 OpCode[Constant]    0 '4'
+0002    | OpCode[Constant]    1 '3'
+0004    | OpCode[Constant]    2 '2'
+0006    | OpCode[Multiply]
+0007    | OpCode[Subtract]
+0008    | OpCode[Constant]    3 '8'
+0010    | OpCode[Constant]    4 '4'
+0012    | OpCode[Divide]
+0013    | OpCode[Add]
+0014    | OpCode[Return]
+"#,
+            utf8_to_string(&buf)
+        );
+
+        let source = r#"!(5 - 4 > 3 * 2 == !nil)"#;
+        let mut scanner = Scanner::new(source.to_string());
+        let tokens = scanner.scan_tokens()?;
+        let compiler = Compiler::new(tokens);
+        let chunk = compiler.compile()?;
+        let mut buf = vec![];
+        chunk.disassemble_chunk_with_writer("test", &mut buf);
+        assert_eq!(
+            r#"== test ==
+0000 0001 OpCode[Constant]    0 '5'
+0002    | OpCode[Constant]    1 '4'
+0004    | OpCode[Subtract]
+0005    | OpCode[Constant]    2 '3'
+0007    | OpCode[Constant]    3 '2'
+0009    | OpCode[Multiply]
+0010    | OpCode[Greater]
+0011    | OpCode[Nil]
+0012    | OpCode[Not]
+0013    | OpCode[EqualEqual]
+0014    | OpCode[Not]
+0015    | OpCode[Return]
+"#,
+            utf8_to_string(&buf)
         );
         Ok(())
     }

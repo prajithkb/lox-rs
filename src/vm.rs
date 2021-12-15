@@ -1,13 +1,14 @@
 use std::convert::TryFrom;
+use std::f64::EPSILON;
 use std::io::stdout;
 use std::time::Instant;
 
 use log::{info, log_enabled, trace, Level};
 
-use crate::chunk::{Chunk, Opcode, Value};
+use crate::chunk::{Chunk, Value};
 use crate::compiler::Compiler;
 use crate::errors::*;
-use crate::instructions::print_value;
+use crate::instructions::{print_value, Opcode};
 use crate::scanner::Scanner;
 use crate::tokens::pretty_print;
 
@@ -53,7 +54,7 @@ impl VirtualMachine {
 
     #[inline]
     fn read_byte(&mut self) -> u8 {
-        self.chunk.code.read_and_increment()
+        *self.chunk.code.read_and_increment()
     }
 
     fn run(&mut self) -> Result<()> {
@@ -63,53 +64,92 @@ impl VirtualMachine {
             }
             let byte = self.read_byte();
             let instruction: Opcode = Opcode::try_from(byte).map_err(|e| {
-                runtime_vm_error(
-                    self.chunk.current_line(),
-                    &format!(
-                        "Invalid instruction (byte:{}) at {}, error: {}",
-                        byte,
-                        self.ip(),
-                        e
-                    ),
-                )
+                self.runtime_error(&format!(
+                    "Invalid instruction (byte:{}) at {}, error: {}",
+                    byte,
+                    self.ip(),
+                    e
+                ))
             })?;
             trace!("VM Internal state: {:?}, {:?}", instruction, self);
             match instruction {
                 Opcode::Constant => {
-                    let constant = self.read_constant();
-                    self.push(constant);
+                    let constant = self.read_constant().clone();
+                    self.push(constant.clone());
                 }
                 Opcode::Return => {
-                    print_value(self.pop(), &mut stdout());
+                    print_value(&self.pop(), &mut stdout());
                     println!();
                     return Ok(());
                 }
                 Opcode::Negate => {
-                    let v = self.pop();
-                    self.push(-v)
+                    if let Value::Number(v) = self.peek_at(0) {
+                        let result = Value::Number(-*v);
+                        self.push(result);
+                    } else {
+                        bail!(self.runtime_error("Can only negate numbers."));
+                    }
                 }
-                Opcode::Add => self.binary_op(|a, b| a + b),
-                Opcode::Subtract => self.binary_op(|a, b| a - b),
-                Opcode::Multiply => self.binary_op(|a, b| a * b),
-                Opcode::Divide => self.binary_op(|a, b| a / b),
-            }
+                Opcode::Add => self.binary_op(|a, b| Value::Number(a + b))?,
+                Opcode::Subtract => self.binary_op(|a, b| Value::Number(a - b))?,
+                Opcode::Multiply => self.binary_op(|a, b| Value::Number(a * b))?,
+                Opcode::Divide => self.binary_op(|a, b| Value::Number(a / b))?,
+                Opcode::Nil => self.push(Value::Nil),
+                Opcode::True => self.push(Value::Bool(true)),
+                Opcode::False => self.push(Value::Bool(false)),
+                Opcode::Not => {
+                    let v = self.pop();
+                    self.push(Value::Bool(is_falsey(v)))
+                }
+                Opcode::BangEqual => {
+                    let v = self.equals()?;
+                    self.push(Value::Bool(!v))
+                }
+                Opcode::Greater => self.binary_op(|a, b| Value::Bool(a > b))?,
+                Opcode::GreaterEqual => self.binary_op(|a, b| Value::Bool(a >= b))?,
+                Opcode::Less => self.binary_op(|a, b| Value::Bool(a < b))?,
+                Opcode::LessEqual => self.binary_op(|a, b| Value::Bool(a <= b))?,
+                Opcode::EqualEqual => {
+                    let v = self.equals()?;
+                    self.push(Value::Bool(v))
+                }
+            };
+        }
+    }
+
+    fn runtime_error(&self, message: &str) -> ErrorKind {
+        runtime_vm_error(self.chunk.current_line(), message)
+    }
+
+    fn peek_at(&self, distance: usize) -> &Value {
+        let top = self.stack.len();
+        self.stack.get(top - 1 - distance).expect("Out of bounds")
+    }
+
+    fn equals(&mut self) -> Result<bool> {
+        let left = self.pop();
+        let right = self.pop();
+        match (left, right) {
+            (Value::Bool(l), Value::Bool(r)) => Ok(l == r),
+            (Value::Nil, Value::Nil) => Ok(true),
+            (Value::Number(l), Value::Number(r)) => Ok((l - r).abs() < EPSILON),
+            _ => Ok(false),
         }
     }
 
     #[inline]
-    fn binary_op(&mut self, op: fn(Value, Value) -> Value) {
-        let right = self.pop();
-        let left = self.pop();
-        self.push(op(left, right));
+    fn binary_op(&mut self, op: fn(f64, f64) -> Value) -> Result<()> {
+        if let (Value::Number(right), Value::Number(left)) = (self.peek_at(0), self.peek_at(1)) {
+            let result = op(*left, *right);
+            self.push(result);
+        } else {
+            bail!(self.runtime_error("Can perform binary operations only on numbers."))
+        }
+        Ok(())
     }
-
     fn read_constant(&mut self) -> Value {
-        self.chunk.read_constant()
+        self.chunk.read_constant().clone()
     }
-
-    // fn reset_stack(&mut self) {
-    //     self.stack_top = 0;
-    // }
 
     fn push(&mut self, value: Value) {
         self.stack.push(value);
@@ -129,46 +169,19 @@ impl VirtualMachine {
     //     println!()
     // }
 
-    fn free(&mut self) {
+    pub fn free(&mut self) {
         self.chunk.free_all();
     }
 }
 
 fn runtime_vm_error(line: usize, message: &str) -> ErrorKind {
-    ErrorKind::VMRuntimeError(format!("Line: {}, message: {}", line, message))
+    ErrorKind::RuntimeError(format!("Line: {}, message: {}", line, message))
 }
 
-// fn repl() -> Result<()> {}
-
-// fn run_script(path: &str) -> Result<()> {}
-
-pub fn vm_main() -> Result<()> {
-    let mut chunk = Chunk::new();
-
-    // -((1.2 + 3.4)/5.6)
-    let constant = chunk.add_constant(1.2);
-    chunk.write_chunk(Opcode::Constant.into(), 123);
-    chunk.write_chunk(constant as u8, 123);
-
-    let constant = chunk.add_constant(3.4);
-    chunk.write_chunk(Opcode::Constant.into(), 123);
-    chunk.write_chunk(constant as u8, 123);
-
-    chunk.write_chunk(Opcode::Add.into(), 123);
-
-    let constant = chunk.add_constant(5.6);
-    chunk.write_chunk(Opcode::Constant.into(), 123);
-    chunk.write_chunk(constant as u8, 123);
-
-    chunk.write_chunk(Opcode::Divide.into(), 123);
-
-    chunk.write_chunk(Opcode::Negate.into(), 123);
-
-    chunk.write_chunk(Opcode::Return.into(), 123);
-    chunk.disassemble_chunk("test chunk");
-    let mut vm = VirtualMachine::new();
-    vm.chunk = chunk;
-    vm.run()?;
-    vm.free();
-    Ok(())
+fn is_falsey(value: Value) -> bool {
+    match value {
+        Value::Bool(b) => !b,
+        Value::Nil => true,
+        _ => false,
+    }
 }

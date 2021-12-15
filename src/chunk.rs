@@ -4,28 +4,31 @@ use std::{
     io::{stdout, Write},
 };
 
-use crate::instructions::{constant_instruction, simple_instruction};
-use num_enum::{IntoPrimitive, TryFromPrimitive};
+use crate::instructions::{constant_instruction, simple_instruction, Opcode};
 
-#[derive(Debug, PartialEq, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
-#[repr(u8)]
-pub enum Opcode {
-    Constant,
-    Return,
-    Add,
-    Subtract,
-    Multiply,
-    Divide,
-    Negate,
+#[derive(Debug, Clone)]
+pub enum Value {
+    Bool(bool),
+    Nil,
+    Number(f64),
+    // Object(Object),
 }
 
-impl Display for Opcode {
+impl Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_fmt(format_args!("OpCode[{:?}]", self))
+        match self {
+            Value::Bool(b) => f.write_str(&b.to_string()),
+            Value::Nil => f.write_str("nil"),
+            Value::Number(n) => f.write_str(&n.to_string()),
+            // Value::Object(o) => todo!(),
+        }
     }
 }
 
-pub type Value = f64;
+// #[derive(Debug, Clone)]
+// pub enum Object {
+//     String(String),
+// }
 
 #[derive(Debug, Clone)]
 pub struct Chunk {
@@ -57,8 +60,8 @@ impl Chunk {
     }
 
     #[inline]
-    pub fn read_constant(&mut self) -> Value {
-        let offset = self.code.read_and_increment();
+    pub fn read_constant(&mut self) -> &Value {
+        let offset = *self.code.read_and_increment();
         self.constants.read_item_at(offset as usize)
     }
 
@@ -85,7 +88,7 @@ impl Chunk {
         } else {
             write!(writer, "{:04} ", self.lines[offset]).expect("Write failed");
         }
-        let byte = self.code.read_item_at(offset);
+        let byte = *self.code.read_item_at(offset);
 
         match Opcode::try_from(byte) {
             Ok(instruction) => match instruction {
@@ -129,13 +132,13 @@ impl Chunk {
 }
 
 #[derive(Debug, PartialEq, Clone)]
-pub struct Memory<T: Copy> {
+pub struct Memory<T> {
     inner: Vec<T>,
     pub count: usize,
     pub current_index: usize,
 }
 
-impl<T: Copy> Memory<T> {
+impl<T> Memory<T> {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Memory {
@@ -156,20 +159,14 @@ impl<T: Copy> Memory<T> {
         self.current_index = index
     }
     #[inline]
-    pub fn read_item_at(&self, index: usize) -> T {
-        self.inner[index]
+    pub fn read_item_at(&self, index: usize) -> &T {
+        self.inner.get(index).expect("Index out of bounds")
     }
 
     #[inline]
-    pub fn read(&self) -> T {
-        self.inner[self.current_index]
-    }
-
-    #[inline]
-    pub fn read_and_increment(&mut self) -> T {
-        let v = self.read();
+    pub fn read_and_increment(&mut self) -> &T {
         self.current_index += 1;
-        v
+        self.read_item_at(self.current_index - 1)
     }
 
     pub fn free_items(&mut self) {
@@ -181,8 +178,9 @@ impl<T: Copy> Memory<T> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        chunk::{Chunk, Opcode},
+        chunk::{Chunk, Value},
         errors::*,
+        instructions::Opcode,
         lox::utf8_to_string,
     };
 
@@ -191,17 +189,17 @@ mod tests {
         let mut chunk = Chunk::new();
 
         // -((1.2 + 3.4)/5.6)
-        let constant = chunk.add_constant(1.2);
+        let constant = chunk.add_constant(Value::Number(1.2));
         chunk.write_chunk(Opcode::Constant.into(), 123);
         chunk.write_chunk(constant as u8, 123);
 
-        let constant = chunk.add_constant(3.4);
+        let constant = chunk.add_constant(Value::Number(3.4));
         chunk.write_chunk(Opcode::Constant.into(), 123);
         chunk.write_chunk(constant as u8, 123);
 
         chunk.write_chunk(Opcode::Add.into(), 123);
 
-        let constant = chunk.add_constant(5.6);
+        let constant = chunk.add_constant(Value::Number(5.6));
         chunk.write_chunk(Opcode::Constant.into(), 123);
         chunk.write_chunk(constant as u8, 123);
 
