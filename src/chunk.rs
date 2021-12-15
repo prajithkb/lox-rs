@@ -1,4 +1,8 @@
-use std::{convert::TryFrom, fmt::Display};
+use std::{
+    convert::TryFrom,
+    fmt::Display,
+    io::{stdout, Write},
+};
 
 use crate::instructions::{constant_instruction, simple_instruction};
 use num_enum::{IntoPrimitive, TryFromPrimitive};
@@ -45,11 +49,11 @@ impl Chunk {
         }
     }
 
-    pub fn add_constant(&mut self, value: Value) -> usize {
+    pub fn add_constant(&mut self, value: Value) -> u8 {
         self.constants.write_item(value);
         // /After we add the constant, we return the index where the constant was appended
         // so that we can locate that same constant later.
-        self.constants.count - 1
+        (self.constants.count - 1) as u8
     }
 
     #[inline]
@@ -59,26 +63,36 @@ impl Chunk {
     }
 
     pub fn disassemble_chunk(&self, name: &str) {
-        println!("== {} ==", name);
+        self.disassemble_chunk_with_writer(name, &mut stdout());
+    }
+
+    pub fn disassemble_chunk_with_writer(&self, name: &str, writer: &mut dyn Write) {
+        writeln!(writer, "== {} ==", name).expect("Write failed");
         let mut offset = 0;
         while offset < self.code.count {
-            offset = self.disassemble_instruction(offset);
+            offset = self.disassemble_instruction_with_writer(offset, writer);
         }
     }
 
-    pub fn disassemble_instruction(&self, offset: usize) -> usize {
-        print!("{:04} ", offset);
+    pub fn disassemble_instruction_with_writer(
+        &self,
+        offset: usize,
+        writer: &mut dyn Write,
+    ) -> usize {
+        write!(writer, "{:04} ", offset).expect("Write failed");
         if offset > 0 && self.lines[offset - 1] == self.lines[offset] {
-            print!("   | ");
+            write!(writer, "   | ").expect("Write failed");
         } else {
-            print!("{:04} ", self.lines[offset]);
+            write!(writer, "{:04} ", self.lines[offset]).expect("Write failed");
         }
         let byte = self.code.read_item_at(offset);
 
         match Opcode::try_from(byte) {
             Ok(instruction) => match instruction {
-                Opcode::Constant => constant_instruction(&instruction.to_string(), self, offset),
-                _ => simple_instruction(&instruction.to_string(), offset),
+                Opcode::Constant => {
+                    constant_instruction(&instruction.to_string(), self, offset, writer)
+                }
+                _ => simple_instruction(&instruction.to_string(), offset, writer),
             },
             Err(e) => {
                 eprintln!(
@@ -88,6 +102,9 @@ impl Chunk {
                 offset + 1
             }
         }
+    }
+    pub fn disassemble_instruction(&self, offset: usize) -> usize {
+        self.disassemble_instruction_with_writer(offset, &mut stdout())
     }
     pub fn write_chunk(&mut self, byte: u8, line: usize) {
         self.code.write_item(byte);
@@ -158,5 +175,44 @@ impl<T: Copy> Memory<T> {
     pub fn free_items(&mut self) {
         self.inner.clear();
         self.count = 0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        chunk::{Chunk, Opcode},
+        errors::*,
+        lox::utf8_to_string,
+    };
+
+    #[test]
+    fn test_chunk() -> Result<()> {
+        let mut chunk = Chunk::new();
+
+        // -((1.2 + 3.4)/5.6)
+        let constant = chunk.add_constant(1.2);
+        chunk.write_chunk(Opcode::Constant.into(), 123);
+        chunk.write_chunk(constant as u8, 123);
+
+        let constant = chunk.add_constant(3.4);
+        chunk.write_chunk(Opcode::Constant.into(), 123);
+        chunk.write_chunk(constant as u8, 123);
+
+        chunk.write_chunk(Opcode::Add.into(), 123);
+
+        let constant = chunk.add_constant(5.6);
+        chunk.write_chunk(Opcode::Constant.into(), 123);
+        chunk.write_chunk(constant as u8, 123);
+
+        chunk.write_chunk(Opcode::Divide.into(), 123);
+
+        chunk.write_chunk(Opcode::Negate.into(), 123);
+
+        chunk.write_chunk(Opcode::Return.into(), 123);
+        let mut buf = vec![];
+        chunk.disassemble_chunk_with_writer("test", &mut buf);
+        assert_eq!("== test ==\n0000 0123 OpCode[Constant]    0 '1.2'\n0002    | OpCode[Constant]    1 '3.4'\n0004    | OpCode[Add]\n0005    | OpCode[Constant]    2 '5.6'\n0007    | OpCode[Divide]\n0008    | OpCode[Negate]\n0009    | OpCode[Return]\n", utf8_to_string(&buf));
+        Ok(())
     }
 }

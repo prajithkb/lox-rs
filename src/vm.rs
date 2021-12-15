@@ -1,10 +1,15 @@
 use std::convert::TryFrom;
+use std::io::stdout;
+use std::time::Instant;
 
-use log::{log_enabled, trace, Level};
+use log::{info, log_enabled, trace, Level};
 
 use crate::chunk::{Chunk, Opcode, Value};
+use crate::compiler::Compiler;
 use crate::errors::*;
 use crate::instructions::print_value;
+use crate::scanner::Scanner;
+use crate::tokens::pretty_print;
 
 #[derive(Debug)]
 pub struct VirtualMachine {
@@ -21,15 +26,25 @@ impl VirtualMachine {
         }
     }
 
-    pub fn interpret(&mut self, chunk: Chunk) -> Result<()> {
-        self.chunk = chunk;
+    pub fn interpret(&mut self, source: String) -> Result<()> {
+        let mut scanner = Scanner::new(source);
+        let start_time = Instant::now();
+        let tokens = scanner.scan_tokens()?;
+        info!("Tokens created in {} us", start_time.elapsed().as_micros());
+        pretty_print(tokens);
+        let start_time = Instant::now();
+        let compiler = Compiler::new(tokens);
+        self.chunk = compiler.compile()?;
+        info!("Compiled in {} us", start_time.elapsed().as_micros());
+        if log_enabled!(Level::Trace) {
+            self.chunk.disassemble_chunk("code");
+        }
+        let start_time = Instant::now();
         self.chunk.code.set_current_index(0);
-        self.run()
+        self.run()?;
+        info!("Ran in {} us", start_time.elapsed().as_micros());
+        Ok(())
     }
-    // #[inline]
-    // fn set_ip(&mut self, offset: usize) {
-    //     self.chunk.code.current_index = offset;
-    // }
 
     #[inline]
     fn ip(&self) -> usize {
@@ -65,7 +80,7 @@ impl VirtualMachine {
                     self.push(constant);
                 }
                 Opcode::Return => {
-                    print_value(self.pop());
+                    print_value(self.pop(), &mut stdout());
                     println!();
                     return Ok(());
                 }
@@ -152,7 +167,8 @@ pub fn vm_main() -> Result<()> {
     chunk.write_chunk(Opcode::Return.into(), 123);
     chunk.disassemble_chunk("test chunk");
     let mut vm = VirtualMachine::new();
-    vm.interpret(chunk)?;
+    vm.chunk = chunk;
+    vm.run()?;
     vm.free();
     Ok(())
 }

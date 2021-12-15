@@ -43,6 +43,7 @@ mod resolver;
 mod scanner;
 mod tokens;
 
-pub mod chunk;
+mod chunk;
+mod compiler;
 mod instructions;
 pub mod vm;

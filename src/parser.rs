@@ -398,7 +398,7 @@ impl<'a> Parser<'a> {
 
     fn logic_or(&mut self) -> Result<Expr> {
         let left = self.logic_and()?;
-        if self.match_and_advance(&[TokenType::OR]) {
+        if self.match_and_advance(&[TokenType::Or]) {
             let operator = self.previous();
             let right = self.logic_and()?;
             Ok(Expr::Logical(Box::new(left), operator, Box::new(right)))

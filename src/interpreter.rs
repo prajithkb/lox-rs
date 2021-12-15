@@ -587,7 +587,7 @@ impl<'a> Interpreter<'a> {
     }
 
     fn evaluate_logical(&mut self, left: &Expr, operator: &Token, right: &Expr) -> Result<Value> {
-        if operator.token_type == TokenType::OR {
+        if operator.token_type == TokenType::Or {
             if let Value::Boolean(result) = self.evaluate(left)? {
                 if result {
                     return Ok(Value::Boolean(result));

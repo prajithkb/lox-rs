@@ -8,12 +8,8 @@ use std::{
 use log::{debug, info};
 
 use crate::{
-    errors::*,
-    interpreter::Interpreter,
-    parser::Parser,
-    resolver::Resolver,
-    scanner::Scanner,
-    vm::{self, VirtualMachine},
+    errors::*, interpreter::Interpreter, parser::Parser, resolver::Resolver, scanner::Scanner,
+    vm::VirtualMachine,
 };
 pub struct Lox<'a> {
     error: Option<LoxError>,
@@ -72,36 +68,9 @@ impl<'a> Lox<'a> {
         }
     }
 
-    pub fn run_vm(&mut self, content: String) -> Result<()> {
-        let mut scanner = Scanner::new(content);
-        let start_time = Instant::now();
-        match scanner.scan_tokens() {
-            Ok(tokens) => {
-                let mut line = 0;
-                // debug!("Created Tokens : {:?}", tokens);
-                for token in tokens {
-                    if token.line != line {
-                        print!("{:04} ", token.line);
-                        line = token.line;
-                    } else {
-                        print!("   | ");
-                    }
-                    println!(
-                        "{:4?} '{:width$}'",
-                        token.token_type,
-                        token.lexeme,
-                        width = token.lexeme.len()
-                    );
-                }
-                info!("Tokens created in {} us", start_time.elapsed().as_micros());
-                vm::vm_main()?;
-                Ok(())
-            }
-            Err(scan_error) => {
-                self.error = Some(LoxError::SyntaxError);
-                Err(scan_error)
-            }
-        }
+    pub fn run_vm(&mut self, source: String) -> Result<()> {
+        self.vm.interpret(source)?;
+        Ok(())
     }
 
     pub fn run_interpreter(&mut self, content: String) -> Result<()> {
@@ -204,4 +173,10 @@ pub fn report_error_with_line_and_location(
         format!("[line: {}] Error {}: message: {}", line, location, message),
         error_writer,
     );
+}
+pub fn utf8_to_string(bytes: &[u8]) -> String {
+    match String::from_utf8(bytes.to_vec()) {
+        Ok(s) => s,
+        Err(_) => String::new(),
+    }
 }
