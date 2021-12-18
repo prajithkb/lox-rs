@@ -31,11 +31,18 @@ impl<'a> std::fmt::Debug for VirtualMachine<'a> {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum StackValue {
     Owned(Value),
     Shared(Shared<Value>),
 }
+
+// impl StackValue {
+//     fn as_shared(self) -> StackValue {
+//         let v = Values::as_shared(self);
+//         StackValue::Shared(v)
+//     }
+// }
 
 impl Value {
     pub fn as_num(&self) -> Result<f64> {
@@ -102,10 +109,10 @@ impl<'a> VirtualMachine<'a> {
     fn run(&mut self) -> Result<()> {
         loop {
             let mut buf = vec![];
-            if log_enabled!(Level::Trace) {
-                self.chunk
-                    .disassemble_instruction_with_writer(self.ip(), &mut buf);
-            }
+            // if log_enabled!(Level::Trace) {
+            self.chunk
+                .disassemble_instruction_with_writer(self.ip(), &mut buf);
+            // }
             let byte = self.read_byte();
             let instruction: Opcode = Opcode::try_from(byte).map_err(|e| {
                 self.runtime_error(&format!(
@@ -116,11 +123,11 @@ impl<'a> VirtualMachine<'a> {
                 ))
             })?;
             trace!(
-                "Instruction: [{}], Stack {:?}, heap: {:?}",
-                utf8_to_string(&buf).trim(),
+                "Stack: <{:?}>, heap: <{:?}>",
                 self.stack,
                 self.runtime_values
             );
+            trace!("Instruction: [{}]", utf8_to_string(&buf).trim());
             match instruction {
                 Opcode::Constant => {
                     let constant = self.read_constant().clone();
@@ -206,9 +213,34 @@ impl<'a> VirtualMachine<'a> {
                         }
                     }
                 }
+                Opcode::GetLocal => {
+                    let index = self.read_byte();
+                    let v = self.stack[index as usize].clone();
+                    self.push(v);
+                }
+                Opcode::SetLocal => {
+                    let index = self.read_byte();
+                    self.stack[index as usize] = self.peek_at(0).clone();
+                }
             };
         }
     }
+
+    // fn convert_to_shared(&mut self, index: usize) -> StackValue {
+    //     let v = &self.stack[index as usize];
+    //     match v {
+    //         StackValue::Owned(_) => {
+    //             let v = std::mem::replace(
+    //                 &mut self.stack[index as usize],
+    //                 StackValue::Owned(Value::Nil),
+    //             );
+    //             let shared_value = v.as_shared();
+    //             let _ = std::mem::replace(&mut self.stack[index as usize], shared_value);
+    //             self.stack[index as usize].clone()
+    //         }
+    //         StackValue::Shared(v) => StackValue::Shared(v.clone()),
+    //     }
+    // }
 
     fn read_string(&mut self) -> Result<&str> {
         let v = self.read_object()?;
@@ -252,7 +284,6 @@ impl<'a> VirtualMachine<'a> {
         }
     }
 
-    #[inline]
     fn binary_op(&mut self, op: fn(f64, f64) -> Value) -> Result<()> {
         let (left, right) = match (self.peek_at(1), self.peek_at(0)) {
             (StackValue::Owned(l), StackValue::Owned(r)) => {
@@ -284,7 +315,6 @@ impl<'a> VirtualMachine<'a> {
         }
     }
 
-    #[inline]
     fn str_add(&mut self) -> Result<()> {
         let (left, right) = match (self.peek_at(1), self.peek_at(0)) {
             (StackValue::Owned(l), StackValue::Owned(r)) => {
@@ -426,7 +456,7 @@ mod tests {
     use super::VirtualMachine;
 
     #[test]
-    fn numeric_expressions() -> Result<()> {
+    fn vm_numeric_expressions() -> Result<()> {
         let mut buf = vec![];
         let mut vm = VirtualMachine::new_with_writer(Some(&mut buf));
         let source = r#"
@@ -452,7 +482,7 @@ mod tests {
     }
 
     #[test]
-    fn string_expressions() -> Result<()> {
+    fn vn_string_expressions() -> Result<()> {
         let mut buf = vec![];
         let mut vm = VirtualMachine::new_with_writer(Some(&mut buf));
         let source = r#"
@@ -465,6 +495,58 @@ mod tests {
         "#;
         vm.interpret(source.to_string())?;
         assert_eq!("hello  world\ntrue\nfalse\n", utf8_to_string(&buf));
+        Ok(())
+    }
+
+    #[test]
+    fn vm_block() -> Result<()> {
+        let mut buf = vec![];
+        let mut vm = VirtualMachine::new_with_writer(Some(&mut buf));
+        let source = r#"
+        var a = 2;
+        {
+            print a;
+            var a = 3;
+            print a;
+            var b = a;
+        }
+        print a;
+        "#;
+        vm.interpret(source.to_string())?;
+        assert_eq!("2\n3\n2\n", utf8_to_string(&buf));
+        let mut buf = vec![];
+        let mut vm = VirtualMachine::new_with_writer(Some(&mut buf));
+        let source = r#"
+        var a = 2;
+        {
+            print a;
+            var a = 3;
+            print a;
+            var b = a;
+        }
+        print a;
+        print b;
+        "#;
+        match vm.interpret(source.to_string()) {
+            Ok(_) => panic!("Expected to fail"),
+            Err(e) => assert_eq!(
+                "Runtime Error: Line: 10, message: Undefined variable b",
+                e.to_string()
+            ),
+        }
+
+        let mut buf = vec![];
+        let mut vm = VirtualMachine::new_with_writer(Some(&mut buf));
+        let source = r#"
+        var a = 2;
+        {
+            var b = (2 + a) * 4;
+            a = b;
+        }
+        print a;
+        "#;
+        vm.interpret(source.to_string())?;
+        assert_eq!("16\n", utf8_to_string(&buf));
         Ok(())
     }
 }

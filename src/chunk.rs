@@ -4,7 +4,7 @@ use std::{
     io::{stdout, Write},
 };
 
-use crate::instructions::{constant_instruction, simple_instruction, Opcode};
+use crate::instructions::{byte_instruction, constant_instruction, simple_instruction, Opcode};
 
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -106,9 +106,12 @@ impl Chunk {
         match Opcode::try_from(byte) {
             Ok(instruction) => match instruction {
                 Opcode::Constant | Opcode::DefineGlobal | Opcode::GetGlobal | Opcode::SetGlobal => {
-                    constant_instruction(&instruction.to_string(), self, offset, writer)
+                    constant_instruction(&instruction, self, offset, writer)
                 }
-                _ => simple_instruction(&instruction.to_string(), offset, writer),
+                Opcode::SetLocal | Opcode::GetLocal => {
+                    byte_instruction(&instruction, self, offset, writer)
+                }
+                _ => simple_instruction(&instruction, offset, writer),
             },
             Err(e) => {
                 eprintln!(

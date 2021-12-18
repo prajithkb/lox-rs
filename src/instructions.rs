@@ -29,6 +29,8 @@ pub enum Opcode {
     DefineGlobal,
     GetGlobal,
     SetGlobal,
+    GetLocal,
+    SetLocal,
 }
 
 impl Display for Opcode {
@@ -37,21 +39,32 @@ impl Display for Opcode {
     }
 }
 
-pub fn simple_instruction(name: &str, offset: usize, writer: &mut dyn Write) -> usize {
-    writeln!(writer, "{}", name).expect("Write failed");
+pub fn simple_instruction(instruction: &Opcode, offset: usize, writer: &mut dyn Write) -> usize {
+    writeln!(writer, "{}", instruction).expect("Write failed");
     offset + 1
 }
 
 pub fn constant_instruction(
-    name: &str,
+    instruction: &Opcode,
     chunk: &Chunk,
     offset: usize,
     writer: &mut dyn Write,
 ) -> usize {
     let constant = *chunk.code.read_item_at(offset + 1);
-    write!(writer, "{:<16} {:4} '", name, constant).expect("Write failed");
+    write!(writer, "{:<16} {:4} '", instruction, constant).expect("Write failed");
     print_value(chunk.constants.read_item_at(constant as usize), writer);
     writeln!(writer, "'").expect("Write failed");
+    offset + 2
+}
+
+pub fn byte_instruction(
+    instruction: &Opcode,
+    chunk: &Chunk,
+    offset: usize,
+    writer: &mut dyn Write,
+) -> usize {
+    let slot = *chunk.code.read_item_at(offset + 1);
+    writeln!(writer, "{:<16} {:4}", instruction, slot).expect("Write failed");
     offset + 2
 }
 
