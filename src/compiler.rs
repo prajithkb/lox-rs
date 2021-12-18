@@ -296,7 +296,7 @@ impl<'a> Compiler<'a> {
 
     fn expression_statement(&mut self) -> Result<()> {
         self.expression()?;
-        self.consume_next_token(TokenType::Semicolon, "Expect ';' after print statement")?;
+        self.consume_next_token(TokenType::Semicolon, "Expect ';' after expression")?;
         self.emit_op_code(Opcode::Pop);
         Ok(())
     }
@@ -543,7 +543,7 @@ mod tests {
 
     #[test]
     fn number() -> Result<()> {
-        let source = r#"3.14"#;
+        let source = r#"3.14;"#;
         let mut scanner = Scanner::new(source.to_string());
         let tokens = scanner.scan_tokens()?;
         let compiler = Compiler::new(tokens);
@@ -551,7 +551,7 @@ mod tests {
         let mut buf = vec![];
         chunk.disassemble_chunk_with_writer("test", &mut buf);
         assert_eq!(
-            "== test ==\n0000 0001 OpCode[Constant]    0 '3.14'\n0002    | OpCode[Return]\n",
+            "== test ==\n0000 0001 OpCode[Constant]    0 '3.14'\n0002    | OpCode[Pop]\n0003    | OpCode[Return]\n",
             utf8_to_string(&buf)
         );
         Ok(())
@@ -559,7 +559,7 @@ mod tests {
 
     #[test]
     fn grouping() -> Result<()> {
-        let source = r#"(3.14)"#;
+        let source = r#"(3.14);"#;
         let mut scanner = Scanner::new(source.to_string());
         let tokens = scanner.scan_tokens()?;
         let compiler = Compiler::new(tokens);
@@ -567,7 +567,7 @@ mod tests {
         let mut buf = vec![];
         chunk.disassemble_chunk_with_writer("test", &mut buf);
         assert_eq!(
-            "== test ==\n0000 0001 OpCode[Constant]    0 '3.14'\n0002    | OpCode[Return]\n",
+            "== test ==\n0000 0001 OpCode[Constant]    0 '3.14'\n0002    | OpCode[Pop]\n0003    | OpCode[Return]\n",
             utf8_to_string(&buf)
         );
         Ok(())
@@ -575,7 +575,7 @@ mod tests {
 
     #[test]
     fn unary() -> Result<()> {
-        let source = r#"-3.14"#;
+        let source = r#"-3.14;"#;
         let mut scanner = Scanner::new(source.to_string());
         let tokens = scanner.scan_tokens()?;
         let compiler = Compiler::new(tokens);
@@ -583,7 +583,7 @@ mod tests {
         let mut buf = vec![];
         chunk.disassemble_chunk_with_writer("test", &mut buf);
         assert_eq!(
-            "== test ==\n0000 0001 OpCode[Constant]    0 '3.14'\n0002    | OpCode[Negate]\n0003    | OpCode[Return]\n",
+            "== test ==\n0000 0001 OpCode[Constant]    0 '3.14'\n0002    | OpCode[Negate]\n0003    | OpCode[Pop]\n0004    | OpCode[Return]\n",
             utf8_to_string(&buf)
         );
         Ok(())
@@ -591,7 +591,7 @@ mod tests {
 
     #[test]
     fn binary() -> Result<()> {
-        let source = r#"4-3*2+8/4"#;
+        let source = r#"4-3*2+8/4;"#;
         let mut scanner = Scanner::new(source.to_string());
         let tokens = scanner.scan_tokens()?;
         let compiler = Compiler::new(tokens);
@@ -609,12 +609,13 @@ mod tests {
 0010    | OpCode[Constant]    4 '4'
 0012    | OpCode[Divide]
 0013    | OpCode[Add]
-0014    | OpCode[Return]
+0014    | OpCode[Pop]
+0015    | OpCode[Return]
 "#,
             utf8_to_string(&buf)
         );
 
-        let source = r#"!(5 - 4 > 3 * 2 == !nil)"#;
+        let source = r#"!(5 - 4 > 3 * 2 == !nil);"#;
         let mut scanner = Scanner::new(source.to_string());
         let tokens = scanner.scan_tokens()?;
         let compiler = Compiler::new(tokens);
@@ -634,7 +635,8 @@ mod tests {
 0012    | OpCode[Not]
 0013    | OpCode[EqualEqual]
 0014    | OpCode[Not]
-0015    | OpCode[Return]
+0015    | OpCode[Pop]
+0016    | OpCode[Return]
 "#,
             utf8_to_string(&buf)
         );
@@ -643,7 +645,7 @@ mod tests {
 
     #[test]
     fn string() -> Result<()> {
-        let source = r#""Hello " + " world" "#;
+        let source = r#""Hello " + " world"; "#;
         let mut scanner = Scanner::new(source.to_string());
         let tokens = scanner.scan_tokens()?;
         let compiler = Compiler::new(tokens);
@@ -655,7 +657,8 @@ mod tests {
 0000 0001 OpCode[Constant]    0 'Hello '
 0002    | OpCode[Constant]    1 ' world'
 0004    | OpCode[Add]
-0005    | OpCode[Return]
+0005    | OpCode[Pop]
+0006    | OpCode[Return]
 "#,
             utf8_to_string(&buf)
         );
