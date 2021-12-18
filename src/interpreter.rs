@@ -6,12 +6,11 @@ use std::io::Write;
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::lox::Shared;
 use crate::parser::{Expr, Stmt};
 
 use crate::errors::*;
 use crate::tokens::{Literal, Token, TokenType};
-
-type Shared<T> = Rc<RefCell<T>>;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {

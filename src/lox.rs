@@ -1,7 +1,9 @@
 use std::{
+    cell::RefCell,
     fs::File,
     io::{self, stdout, Read, Write},
     process::exit,
+    rc::Rc,
     time::Instant,
 };
 
@@ -11,10 +13,15 @@ use crate::{
     errors::*, interpreter::Interpreter, parser::Parser, resolver::Resolver, scanner::Scanner,
     vm::VirtualMachine,
 };
+
+pub type Shared<T> = Rc<RefCell<T>>;
+
+pub type Writer<'a> = Option<&'a mut dyn Write>;
+
 pub struct Lox<'a> {
     error: Option<LoxError>,
     interpreter: Interpreter<'a>,
-    vm: VirtualMachine,
+    vm: VirtualMachine<'a>,
 }
 #[derive(Clone)]
 pub enum LoxRunType {

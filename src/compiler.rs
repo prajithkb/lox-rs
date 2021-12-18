@@ -2,10 +2,10 @@ use log::log_enabled;
 use num_enum::{FromPrimitive, IntoPrimitive};
 
 use crate::{
-    chunk::{Chunk, Value},
+    chunk::{Chunk, Object, ObjectType, Value},
     errors::*,
     instructions::Opcode,
-    tokens::TokenType,
+    tokens::{Literal, TokenType},
 };
 
 use crate::tokens::Token;
@@ -40,7 +40,7 @@ impl Precedence {
     }
 }
 
-type ParseFn<'a> = fn(&mut Compiler<'a>) -> Result<()>;
+type ParseFn<'a> = fn(&mut Compiler<'a>, bool) -> Result<()>;
 struct ParseRule<'a> {
     token_type: TokenType,
     prefix_function: Option<ParseFn<'a>>,
@@ -174,8 +174,18 @@ impl<'a> Compiler<'a> {
                 Some(Compiler::binary),
                 Precedence::Comparison,
             ),
-            ParseRule::new(TokenType::Identifier, None, None, Precedence::None),
-            ParseRule::new(TokenType::String, None, None, Precedence::None),
+            ParseRule::new(
+                TokenType::Identifier,
+                Some(Compiler::variable_usage),
+                None,
+                Precedence::None,
+            ),
+            ParseRule::new(
+                TokenType::String,
+                Some(Compiler::string),
+                None,
+                Precedence::None,
+            ),
             ParseRule::new(
                 TokenType::Number,
                 Some(Compiler::number),
@@ -218,10 +228,77 @@ impl<'a> Compiler<'a> {
     }
 
     pub fn compile(mut self) -> Result<Chunk> {
-        self.expression()?;
-        self.consume_next_token(TokenType::Eof, "Expect end of expression")?;
+        while !self.is_at_end() {
+            self.declaration()?;
+        }
         self.end_compiler();
         Ok(self.compiling_chunk)
+    }
+
+    fn declaration(&mut self) -> Result<()> {
+        if self.match_and_advance(&[TokenType::Var]) {
+            self.var_declaration()?;
+        } else {
+            self.statement()?;
+        }
+        Ok(())
+    }
+
+    fn var_declaration(&mut self) -> Result<()> {
+        let global = self.parse_variable("Expect variable name")?;
+        if self.match_and_advance(&[TokenType::Equal]) {
+            self.expression()?;
+        } else {
+            self.emit_op_code(Opcode::Nil);
+        }
+        self.consume_next_token(
+            TokenType::Semicolon,
+            "Expect ';' after variable declaration.",
+        )?;
+        self.define_variable(global);
+        Ok(())
+    }
+
+    fn variable_usage(&mut self, can_assign: bool) -> Result<()> {
+        self.named_variable(self.previous().clone(), can_assign)
+    }
+
+    fn named_variable(&mut self, token: Token, can_assign: bool) -> Result<()> {
+        let arg = self.identifier_constant(token)?;
+        if can_assign && self.match_and_advance(&[TokenType::Equal]) {
+            self.expression()?;
+            self.emit_opcode_and_bytes(Opcode::SetGlobal, arg)
+        } else {
+            self.emit_opcode_and_bytes(Opcode::GetGlobal, arg);
+        }
+        Ok(())
+    }
+
+    fn define_variable(&mut self, byte: u8) {
+        self.emit_opcode_and_bytes(Opcode::DefineGlobal, byte);
+    }
+
+    fn statement(&mut self) -> Result<()> {
+        if self.match_and_advance(&[TokenType::Print]) {
+            self.print_statement()?;
+        } else {
+            self.expression_statement()?;
+        }
+        Ok(())
+    }
+
+    fn print_statement(&mut self) -> Result<()> {
+        self.expression()?;
+        self.consume_next_token(TokenType::Semicolon, "Expect ';' after print statement")?;
+        self.emit_op_code(Opcode::Print);
+        Ok(())
+    }
+
+    fn expression_statement(&mut self) -> Result<()> {
+        self.expression()?;
+        self.consume_next_token(TokenType::Semicolon, "Expect ';' after print statement")?;
+        self.emit_op_code(Opcode::Pop);
+        Ok(())
     }
 
     fn expression(&mut self) -> Result<()> {
@@ -231,35 +308,53 @@ impl<'a> Compiler<'a> {
 
     fn parse_precedence(&mut self, precedence: Precedence) -> Result<()> {
         self.advance();
-        match self.get_rule(self.previous().token_type).prefix_function {
-            Some(prefix_rule) => prefix_rule(self)?,
+        let previous = self.previous().token_type;
+        let can_assign = precedence <= Precedence::Assignment;
+        match self.get_rule(previous).prefix_function {
+            Some(prefix_rule) => prefix_rule(self, can_assign)?,
             None => bail!(parse_error(self.previous(), "Expect expression")),
         };
+
         while precedence <= self.get_rule(self.current().token_type).precedence {
             self.advance();
             match self.get_rule(self.previous().token_type).infix_function {
-                Some(infix_rule) => infix_rule(self)?,
+                Some(infix_rule) => infix_rule(self, can_assign)?,
                 None => bail!(parse_error(self.previous(), "Expect expression")),
             };
+        }
+        if can_assign && self.match_and_advance(&[TokenType::Equal]) {
+            bail!(parse_error(self.previous(), "Invalid assignment target"))
         }
         Ok(())
     }
 
-    fn number(&mut self) -> Result<()> {
-        let str = &self.previous().lexeme;
-        let value = str::parse::<f64>(str)
-            .map_err(|_| ErrorKind::ParseError(format!("{} not a number", str)))?;
-        self.emit_constant(Value::Number(value));
-        Ok(())
+    fn number(&mut self, _can_assign: bool) -> Result<()> {
+        if let Some(Literal::Number(n)) = &self.previous().literal {
+            let value = Value::Number(*n);
+            self.emit_constant(value);
+            Ok(())
+        } else {
+            bail!(parse_error(self.previous(), "not a number"))
+        }
     }
 
-    fn grouping(&mut self) -> Result<()> {
+    fn string(&mut self, _can_assign: bool) -> Result<()> {
+        if let Some(Literal::String(s)) = &self.previous().literal {
+            let value = Value::Object(Object::new(1, ObjectType::String(s.to_string())));
+            self.emit_constant(value);
+            Ok(())
+        } else {
+            bail!(parse_error(self.previous(), "not a string"))
+        }
+    }
+
+    fn grouping(&mut self, _can_assign: bool) -> Result<()> {
         self.expression()?;
         self.consume_next_token(TokenType::RightParen, "Expect ')' after expression")?;
         Ok(())
     }
 
-    fn unary(&mut self) -> Result<()> {
+    fn unary(&mut self, _can_assign: bool) -> Result<()> {
         let token_type = self.previous().token_type;
         self.parse_precedence(Precedence::Unary)?;
         match token_type {
@@ -273,7 +368,7 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn binary(&mut self) -> Result<()> {
+    fn binary(&mut self, _can_assign: bool) -> Result<()> {
         let prev_token = self.previous().clone();
         let operator = prev_token.token_type;
         let rule = self.get_rule(operator);
@@ -295,7 +390,7 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn literal(&mut self) -> Result<()> {
+    fn literal(&mut self, _can_assign: bool) -> Result<()> {
         match self.previous().token_type {
             TokenType::Nil => self.emit_op_code(Opcode::Nil),
             TokenType::True => self.emit_op_code(Opcode::True),
@@ -311,18 +406,40 @@ impl<'a> Compiler<'a> {
     }
 
     fn emit_constant(&mut self, value: Value) {
-        let offset = self.current_chunk().add_constant(value);
+        let offset = self.add_constant(value);
         self.emit_opcode_and_bytes(Opcode::Constant, offset);
     }
+
+    #[inline]
+    fn add_constant(&mut self, value: Value) -> u8 {
+        self.current_chunk().add_constant(value)
+    }
+
     fn end_compiler(&mut self) {
         self.emit_return();
         if log_enabled!(log::Level::Trace) {
             self.current_chunk().disassemble_chunk("code");
+            println!("==========")
         }
     }
 
     fn emit_return(&mut self) {
         self.emit_op_code(Opcode::Return)
+    }
+
+    fn parse_variable(&mut self, message: &str) -> Result<u8> {
+        self.consume_next_token(TokenType::Identifier, message)?;
+        self.identifier_constant(self.previous().clone())
+    }
+
+    fn identifier_constant(&mut self, mut token: Token) -> Result<u8> {
+        let literal = token.literal.take();
+        if let Literal::Identifier(s) = literal.expect("Expect string") {
+            let name = Value::Object(Object::new(1, ObjectType::String(s)));
+            Ok(self.add_constant(name))
+        } else {
+            bail!(parse_error(&token, "Expect identifier"))
+        }
     }
 
     #[inline]
@@ -420,16 +537,9 @@ impl<'a> Compiler<'a> {
 
 #[cfg(test)]
 mod tests {
-    use crate::{errors::*, scanner::Scanner};
+    use crate::{errors::*, lox::utf8_to_string, scanner::Scanner};
 
     use super::Compiler;
-
-    fn utf8_to_string(bytes: &[u8]) -> String {
-        match String::from_utf8(bytes.to_vec()) {
-            Ok(s) => s,
-            Err(_) => String::new(),
-        }
-    }
 
     #[test]
     fn number() -> Result<()> {
@@ -525,6 +635,69 @@ mod tests {
 0013    | OpCode[EqualEqual]
 0014    | OpCode[Not]
 0015    | OpCode[Return]
+"#,
+            utf8_to_string(&buf)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn string() -> Result<()> {
+        let source = r#""Hello " + " world" "#;
+        let mut scanner = Scanner::new(source.to_string());
+        let tokens = scanner.scan_tokens()?;
+        let compiler = Compiler::new(tokens);
+        let chunk = compiler.compile()?;
+        let mut buf = vec![];
+        chunk.disassemble_chunk_with_writer("test", &mut buf);
+        assert_eq!(
+            r#"== test ==
+0000 0001 OpCode[Constant]    0 'Hello '
+0002    | OpCode[Constant]    1 ' world'
+0004    | OpCode[Add]
+0005    | OpCode[Return]
+"#,
+            utf8_to_string(&buf)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn print() -> Result<()> {
+        let source = r#"print 3 + 3;"#;
+        let mut scanner = Scanner::new(source.to_string());
+        let tokens = scanner.scan_tokens()?;
+        let compiler = Compiler::new(tokens);
+        let chunk = compiler.compile()?;
+        let mut buf = vec![];
+        chunk.disassemble_chunk_with_writer("test", &mut buf);
+        assert_eq!(
+            r#"== test ==
+0000 0001 OpCode[Constant]    0 '3'
+0002    | OpCode[Constant]    1 '3'
+0004    | OpCode[Add]
+0005    | OpCode[Print]
+0006    | OpCode[Return]
+"#,
+            utf8_to_string(&buf)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn var_declaration() -> Result<()> {
+        let source = r#"var a =2;"#;
+        let mut scanner = Scanner::new(source.to_string());
+        let tokens = scanner.scan_tokens()?;
+        let compiler = Compiler::new(tokens);
+        let chunk = compiler.compile()?;
+        let mut buf = vec![];
+        chunk.disassemble_chunk_with_writer("test", &mut buf);
+        assert_eq!(
+            r#"== test ==
+0000 0001 OpCode[Constant]    1 '2'
+0002    | OpCode[DefineGlobal]    0 'a'
+0004    | OpCode[Return]
 "#,
             utf8_to_string(&buf)
         );

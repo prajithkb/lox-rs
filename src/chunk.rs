@@ -11,7 +11,7 @@ pub enum Value {
     Bool(bool),
     Nil,
     Number(f64),
-    // Object(Object),
+    Object(Object),
 }
 
 impl Display for Value {
@@ -20,15 +20,28 @@ impl Display for Value {
             Value::Bool(b) => f.write_str(&b.to_string()),
             Value::Nil => f.write_str("nil"),
             Value::Number(n) => f.write_str(&n.to_string()),
-            // Value::Object(o) => todo!(),
+            Value::Object(o) => match &o.object_type {
+                ObjectType::String(s) => f.write_str(s),
+            },
         }
     }
 }
+#[derive(Debug, Clone)]
+pub struct Object {
+    pub id: usize,
+    pub object_type: ObjectType,
+}
 
-// #[derive(Debug, Clone)]
-// pub enum Object {
-//     String(String),
-// }
+impl Object {
+    pub fn new(id: usize, object_type: ObjectType) -> Self {
+        Object { id, object_type }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub enum ObjectType {
+    String(String),
+}
 
 #[derive(Debug, Clone)]
 pub struct Chunk {
@@ -92,7 +105,7 @@ impl Chunk {
 
         match Opcode::try_from(byte) {
             Ok(instruction) => match instruction {
-                Opcode::Constant => {
+                Opcode::Constant | Opcode::DefineGlobal | Opcode::GetGlobal | Opcode::SetGlobal => {
                     constant_instruction(&instruction.to_string(), self, offset, writer)
                 }
                 _ => simple_instruction(&instruction.to_string(), offset, writer),
@@ -106,6 +119,7 @@ impl Chunk {
             }
         }
     }
+    #[allow(dead_code)]
     pub fn disassemble_instruction(&self, offset: usize) -> usize {
         self.disassemble_instruction_with_writer(offset, &mut stdout())
     }

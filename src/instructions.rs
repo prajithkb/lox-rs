@@ -24,6 +24,11 @@ pub enum Opcode {
     GreaterEqual,
     Less,
     LessEqual,
+    Print,
+    Pop,
+    DefineGlobal,
+    GetGlobal,
+    SetGlobal,
 }
 
 impl Display for Opcode {

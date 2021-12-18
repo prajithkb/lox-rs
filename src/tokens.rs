@@ -133,8 +133,8 @@ impl Display for Token {
 }
 
 pub fn pretty_print(tokens: &[Token]) {
+    println!("== Tokens ==");
     let mut line = 0;
-    // debug!("Created Tokens : {:?}", tokens);
     for token in tokens {
         if token.line != line {
             print!("{:04} ", token.line);
@@ -149,4 +149,5 @@ pub fn pretty_print(tokens: &[Token]) {
             width = token.lexeme.len()
         );
     }
+    println!("============");
 }
