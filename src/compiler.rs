@@ -345,6 +345,8 @@ impl<'a> Compiler<'a> {
     fn statement(&mut self) -> Result<()> {
         if self.match_and_advance(&[TokenType::Print]) {
             self.print_statement()?;
+        } else if self.match_and_advance(&[TokenType::If]) {
+            self.if_statement()?;
         } else if self.match_and_advance(&[TokenType::LeftBrace]) {
             self.begin_scope();
             self.block()?;
@@ -352,6 +354,23 @@ impl<'a> Compiler<'a> {
         } else {
             self.expression_statement()?;
         }
+        Ok(())
+    }
+
+    fn if_statement(&mut self) -> Result<()> {
+        self.consume_next_token(TokenType::LeftParen, "Expect '(' after if")?;
+        self.expression()?;
+        self.consume_next_token(TokenType::RightParen, "Expect ')' after condition")?;
+        let then_jump = self.emit_jump(Opcode::JumpIfFalse);
+        self.emit_op_code(Opcode::Pop);
+        self.statement()?;
+        let else_jump = self.emit_jump(Opcode::Jump);
+        self.patch_jump(then_jump)?;
+        self.emit_op_code(Opcode::Pop);
+        if self.match_and_advance(&[TokenType::Else]) {
+            self.statement()?;
+        }
+        self.patch_jump(else_jump)?;
         Ok(())
     }
 
@@ -371,7 +390,7 @@ impl<'a> Compiler<'a> {
 
     fn end_scope(&mut self) {
         self.current_scope.depth -= 1;
-        let mut i: i32 = (self.current_scope.locals.len() - 1) as i32;
+        let mut i: i32 = self.current_scope.locals.len() as i32 - 1;
         while i >= 0 {
             if self.current_scope.locals[i as usize]
                 .depth
@@ -507,6 +526,24 @@ impl<'a> Compiler<'a> {
     }
 
     #[inline]
+    fn emit_jump(&mut self, opcode: Opcode) -> usize {
+        self.emit_op_code(opcode);
+        self.emit_byte(0xff);
+        self.emit_byte(0xff);
+        self.current_chunk().code.count - 2
+    }
+
+    #[inline]
+    fn patch_jump(&mut self, offset: usize) -> Result<()> {
+        let jump = self.current_chunk().code.count - offset - 2;
+        let first = ((jump >> 8) & 0xff) as u8;
+        let second = (jump & 0xff) as u8;
+        self.current_chunk().code.values_mut()[offset] = first;
+        self.current_chunk().code.values_mut()[offset + 1] = second;
+        Ok(())
+    }
+
+    #[inline]
     fn emit_constant(&mut self, value: Value) {
         let offset = self.add_constant(value);
         self.emit_opcode_and_bytes(Opcode::Constant, offset);
@@ -615,6 +652,7 @@ impl<'a> Compiler<'a> {
             bail!(parse_error(previous, message))
         }
     }
+    #[inline]
     fn match_and_advance(&mut self, token_types_to_match: &[TokenType]) -> bool {
         if self.is_at_end() {
             return false;
@@ -688,7 +726,11 @@ mod tests {
         let mut buf = vec![];
         chunk.disassemble_chunk_with_writer("test", &mut buf);
         assert_eq!(
-            "== test ==\n0000 0001 OpCode[Constant]    0 '3.14'\n0002    | OpCode[Pop]\n0003    | OpCode[Return]\n",
+            r#"== test ==
+0000 0001 OpCode[Constant]                  0 '3.14'
+0002    | OpCode[Pop]
+0003    | OpCode[Return]
+"#,
             utf8_to_string(&buf)
         );
         Ok(())
@@ -704,7 +746,11 @@ mod tests {
         let mut buf = vec![];
         chunk.disassemble_chunk_with_writer("test", &mut buf);
         assert_eq!(
-            "== test ==\n0000 0001 OpCode[Constant]    0 '3.14'\n0002    | OpCode[Pop]\n0003    | OpCode[Return]\n",
+            r#"== test ==
+0000 0001 OpCode[Constant]                  0 '3.14'
+0002    | OpCode[Pop]
+0003    | OpCode[Return]
+"#,
             utf8_to_string(&buf)
         );
         Ok(())
@@ -720,7 +766,12 @@ mod tests {
         let mut buf = vec![];
         chunk.disassemble_chunk_with_writer("test", &mut buf);
         assert_eq!(
-            "== test ==\n0000 0001 OpCode[Constant]    0 '3.14'\n0002    | OpCode[Negate]\n0003    | OpCode[Pop]\n0004    | OpCode[Return]\n",
+            r#"== test ==
+0000 0001 OpCode[Constant]                  0 '3.14'
+0002    | OpCode[Negate]
+0003    | OpCode[Pop]
+0004    | OpCode[Return]
+"#,
             utf8_to_string(&buf)
         );
         Ok(())
@@ -737,13 +788,13 @@ mod tests {
         chunk.disassemble_chunk_with_writer("test", &mut buf);
         assert_eq!(
             r#"== test ==
-0000 0001 OpCode[Constant]    0 '4'
-0002    | OpCode[Constant]    1 '3'
-0004    | OpCode[Constant]    2 '2'
+0000 0001 OpCode[Constant]                  0 '4'
+0002    | OpCode[Constant]                  1 '3'
+0004    | OpCode[Constant]                  2 '2'
 0006    | OpCode[Multiply]
 0007    | OpCode[Subtract]
-0008    | OpCode[Constant]    3 '8'
-0010    | OpCode[Constant]    4 '4'
+0008    | OpCode[Constant]                  3 '8'
+0010    | OpCode[Constant]                  4 '4'
 0012    | OpCode[Divide]
 0013    | OpCode[Add]
 0014    | OpCode[Pop]
@@ -761,11 +812,11 @@ mod tests {
         chunk.disassemble_chunk_with_writer("test", &mut buf);
         assert_eq!(
             r#"== test ==
-0000 0001 OpCode[Constant]    0 '5'
-0002    | OpCode[Constant]    1 '4'
+0000 0001 OpCode[Constant]                  0 '5'
+0002    | OpCode[Constant]                  1 '4'
 0004    | OpCode[Subtract]
-0005    | OpCode[Constant]    2 '3'
-0007    | OpCode[Constant]    3 '2'
+0005    | OpCode[Constant]                  2 '3'
+0007    | OpCode[Constant]                  3 '2'
 0009    | OpCode[Multiply]
 0010    | OpCode[Greater]
 0011    | OpCode[Nil]
@@ -791,8 +842,8 @@ mod tests {
         chunk.disassemble_chunk_with_writer("test", &mut buf);
         assert_eq!(
             r#"== test ==
-0000 0001 OpCode[Constant]    0 'Hello '
-0002    | OpCode[Constant]    1 ' world'
+0000 0001 OpCode[Constant]                  0 'Hello '
+0002    | OpCode[Constant]                  1 ' world'
 0004    | OpCode[Add]
 0005    | OpCode[Pop]
 0006    | OpCode[Return]
@@ -813,8 +864,8 @@ mod tests {
         chunk.disassemble_chunk_with_writer("test", &mut buf);
         assert_eq!(
             r#"== test ==
-0000 0001 OpCode[Constant]    0 '3'
-0002    | OpCode[Constant]    1 '3'
+0000 0001 OpCode[Constant]                  0 '3'
+0002    | OpCode[Constant]                  1 '3'
 0004    | OpCode[Add]
 0005    | OpCode[Print]
 0006    | OpCode[Return]
@@ -835,8 +886,8 @@ mod tests {
         chunk.disassemble_chunk_with_writer("test", &mut buf);
         assert_eq!(
             r#"== test ==
-0000 0001 OpCode[Constant]    1 '2'
-0002    | OpCode[DefineGlobal]    0 'a'
+0000 0001 OpCode[Constant]                  1 '2'
+0002    | OpCode[DefineGlobal]              0 'a'
 0004    | OpCode[Return]
 "#,
             utf8_to_string(&buf)
@@ -862,24 +913,69 @@ mod tests {
         let compiler = Compiler::new(tokens);
         let chunk = compiler.compile()?;
         let mut buf = vec![];
+
         chunk.disassemble_chunk_with_writer("test", &mut buf);
         assert_eq!(
             r#"== test ==
-0000 0002 OpCode[Constant]    1 '2'
-0002    | OpCode[DefineGlobal]    0 'a'
-0004 0004 OpCode[GetGlobal]    2 'a'
+0000 0002 OpCode[Constant]                  1 '2'
+0002    | OpCode[DefineGlobal]              0 'a'
+0004 0004 OpCode[GetGlobal]                 2 'a'
 0006    | OpCode[Print]
-0007 0005 OpCode[Constant]    3 '3'
-0009 0006 OpCode[GetLocal]    0
+0007 0005 OpCode[Constant]                  3 '3'
+0009 0006 OpCode[GetLocal]                  0
 0011    | OpCode[Print]
-0012 0007 OpCode[GetLocal]    0
+0012 0007 OpCode[GetLocal]                  0
 0014 0008 OpCode[Pop]
 0015    | OpCode[Pop]
-0016 0009 OpCode[GetGlobal]    4 'a'
+0016 0009 OpCode[GetGlobal]                 4 'a'
 0018    | OpCode[Print]
-0019 0010 OpCode[GetGlobal]    5 'b'
+0019 0010 OpCode[GetGlobal]                 5 'b'
 0021    | OpCode[Print]
 0022    | OpCode[Return]
+"#,
+            utf8_to_string(&buf)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn if_condition() -> Result<()> {
+        let source = r#"
+        var a = "";
+        var condition = true;
+        if (condition) {
+            a = "if";
+        } else {
+            a = "else";
+        }
+        print a;
+        "#;
+        let mut scanner = Scanner::new(source.to_string());
+        let tokens = scanner.scan_tokens()?;
+        let compiler = Compiler::new(tokens);
+        let chunk = compiler.compile()?;
+        let mut buf = vec![];
+        chunk.disassemble_chunk_with_writer("test", &mut buf);
+        assert_eq!(
+            r#"== test ==
+0000 0002 OpCode[Constant]                  1 ''
+0002    | OpCode[DefineGlobal]              0 'a'
+0004 0003 OpCode[True]
+0005    | OpCode[DefineGlobal]              2 'condition'
+0007 0004 OpCode[GetGlobal]                 3 'condition'
+0009    | OpCode[JumpIfFalse]               9 -> 21
+0012    | OpCode[Pop]
+0013 0005 OpCode[Constant]                  5 'if'
+0015    | OpCode[SetGlobal]                 4 'a'
+0017    | OpCode[Pop]
+0018 0006 OpCode[Jump]                     18 -> 27
+0021    | OpCode[Pop]
+0022 0007 OpCode[Constant]                  7 'else'
+0024    | OpCode[SetGlobal]                 6 'a'
+0026    | OpCode[Pop]
+0027 0009 OpCode[GetGlobal]                 8 'a'
+0029    | OpCode[Print]
+0030    | OpCode[Return]
 "#,
             utf8_to_string(&buf)
         );

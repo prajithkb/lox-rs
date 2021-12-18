@@ -1,10 +1,9 @@
 use std::{
-    convert::TryFrom,
     fmt::Display,
     io::{stdout, Write},
 };
 
-use crate::instructions::{byte_instruction, constant_instruction, simple_instruction, Opcode};
+use crate::instructions::{self};
 
 #[derive(Debug, Clone)]
 pub enum Value {
@@ -102,30 +101,9 @@ impl Chunk {
             write!(writer, "{:04} ", self.lines[offset]).expect("Write failed");
         }
         let byte = *self.code.read_item_at(offset);
+        instructions::disassemble_instruction(byte, self, offset, writer)
+    }
 
-        match Opcode::try_from(byte) {
-            Ok(instruction) => match instruction {
-                Opcode::Constant | Opcode::DefineGlobal | Opcode::GetGlobal | Opcode::SetGlobal => {
-                    constant_instruction(&instruction, self, offset, writer)
-                }
-                Opcode::SetLocal | Opcode::GetLocal => {
-                    byte_instruction(&instruction, self, offset, writer)
-                }
-                _ => simple_instruction(&instruction, offset, writer),
-            },
-            Err(e) => {
-                eprintln!(
-                    "Invalid instruction {:?}[value={}], error: {}",
-                    byte, offset, e
-                );
-                offset + 1
-            }
-        }
-    }
-    #[allow(dead_code)]
-    pub fn disassemble_instruction(&self, offset: usize) -> usize {
-        self.disassemble_instruction_with_writer(offset, &mut stdout())
-    }
     pub fn write_chunk(&mut self, byte: u8, line: usize) {
         self.code.write_item(byte);
         self.lines.push(line);
@@ -144,7 +122,7 @@ impl Chunk {
     }
 
     pub fn current_line(&self) -> usize {
-        self.lines[self.code.current_index]
+        self.lines[self.code.read_index]
     }
 }
 
@@ -152,7 +130,7 @@ impl Chunk {
 pub struct Memory<T> {
     inner: Vec<T>,
     pub count: usize,
-    pub current_index: usize,
+    pub read_index: usize,
 }
 
 impl<T> Memory<T> {
@@ -161,8 +139,12 @@ impl<T> Memory<T> {
         Memory {
             inner: vec![],
             count: 0,
-            current_index: 0,
+            read_index: 0,
         }
+    }
+
+    pub fn values_mut(&mut self) -> &mut Vec<T> {
+        &mut self.inner
     }
 
     #[inline]
@@ -173,7 +155,7 @@ impl<T> Memory<T> {
 
     #[inline]
     pub fn set_current_index(&mut self, index: usize) {
-        self.current_index = index
+        self.read_index = index
     }
     #[inline]
     pub fn read_item_at(&self, index: usize) -> &T {
@@ -182,8 +164,8 @@ impl<T> Memory<T> {
 
     #[inline]
     pub fn read_and_increment(&mut self) -> &T {
-        self.current_index += 1;
-        self.read_item_at(self.current_index - 1)
+        self.read_index += 1;
+        self.read_item_at(self.read_index - 1)
     }
 
     pub fn free_items(&mut self) {
@@ -227,7 +209,18 @@ mod tests {
         chunk.write_chunk(Opcode::Return.into(), 123);
         let mut buf = vec![];
         chunk.disassemble_chunk_with_writer("test", &mut buf);
-        assert_eq!("== test ==\n0000 0123 OpCode[Constant]    0 '1.2'\n0002    | OpCode[Constant]    1 '3.4'\n0004    | OpCode[Add]\n0005    | OpCode[Constant]    2 '5.6'\n0007    | OpCode[Divide]\n0008    | OpCode[Negate]\n0009    | OpCode[Return]\n", utf8_to_string(&buf));
+        assert_eq!(
+            r#"== test ==
+0000 0123 OpCode[Constant]                  0 '1.2'
+0002    | OpCode[Constant]                  1 '3.4'
+0004    | OpCode[Add]
+0005    | OpCode[Constant]                  2 '5.6'
+0007    | OpCode[Divide]
+0008    | OpCode[Negate]
+0009    | OpCode[Return]
+"#,
+            utf8_to_string(&buf)
+        );
         Ok(())
     }
 }

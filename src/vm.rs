@@ -98,12 +98,30 @@ impl<'a> VirtualMachine<'a> {
 
     #[inline]
     fn ip(&self) -> usize {
-        self.chunk.code.current_index
+        self.chunk.code.read_index
+    }
+
+    #[inline]
+    fn increment_ip_by(&mut self, offset: u16) {
+        let ip = self.ip();
+        self.set_ip(ip + offset as usize);
+    }
+
+    #[inline]
+    fn set_ip(&mut self, index: usize) {
+        self.chunk.code.read_index = index;
     }
 
     #[inline]
     fn read_byte(&mut self) -> u8 {
         *self.chunk.code.read_and_increment()
+    }
+
+    #[inline]
+    fn read_short(&mut self) -> u16 {
+        let first = *self.chunk.code.read_and_increment() as u16;
+        let second = *self.chunk.code.read_and_increment() as u16;
+        first << 8 | second
     }
 
     fn run(&mut self) -> Result<()> {
@@ -160,7 +178,7 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::False => self.push(StackValue::Owned(Value::Bool(false))),
                 Opcode::Not => {
                     let v = self.pop();
-                    self.push(StackValue::Owned(Value::Bool(is_falsey(v))))
+                    self.push(StackValue::Owned(Value::Bool(is_falsey(&v))))
                 }
                 Opcode::BangEqual => {
                     let v = self.equals()?;
@@ -221,6 +239,16 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::SetLocal => {
                     let index = self.read_byte();
                     self.stack[index as usize] = self.peek_at(0).clone();
+                }
+                Opcode::JumpIfFalse => {
+                    let offset = self.read_short();
+                    if is_falsey(self.peek_at(0)) {
+                        self.increment_ip_by(offset);
+                    }
+                }
+                Opcode::Jump => {
+                    let offset = self.read_short();
+                    self.increment_ip_by(offset);
                 }
             };
         }
@@ -429,7 +457,7 @@ fn value_equals(l: &Value, r: &Value) -> Result<bool> {
     }
 }
 
-fn is_falsey(value: StackValue) -> bool {
+fn is_falsey(value: &StackValue) -> bool {
     match value {
         StackValue::Owned(Value::Bool(b)) => !b,
         StackValue::Owned(Value::Nil) => true,
@@ -547,6 +575,32 @@ mod tests {
         "#;
         vm.interpret(source.to_string())?;
         assert_eq!("16\n", utf8_to_string(&buf));
+        Ok(())
+    }
+
+    #[test]
+    fn vm_if_statement() -> Result<()> {
+        let mut buf = vec![];
+        let mut vm = VirtualMachine::new_with_writer(Some(&mut buf));
+        let source = r#"
+        var a = "";
+        var condition = true;
+        if (condition) {
+            a = "if";
+        } else {
+            a = "else";
+        }
+        print a;
+        condition = 2==3;
+        if (condition) {
+            a = "if";
+        } else {
+            a = "else";
+        }
+        print a;
+        "#;
+        vm.interpret(source.to_string())?;
+        assert_eq!("if\nelse\n", utf8_to_string(&buf));
         Ok(())
     }
 }
