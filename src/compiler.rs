@@ -623,7 +623,10 @@ impl<'a> Compiler<'a> {
 
     #[inline]
     fn emit_byte(&mut self, byte: u8) {
-        let line = self.previous().line;
+        let mut line = 0;
+        if self.current_index != 0 {
+            line = self.previous().line;
+        }
         self.current_chunk().write_chunk(byte, line);
     }
 
