@@ -166,8 +166,8 @@ impl<T> Memory<T> {
     }
 
     #[inline]
-    pub fn write_item(&mut self, byte: T) {
-        self.inner.push(byte);
+    pub fn write_item(&mut self, item: T) {
+        self.inner.push(item);
         self.count += 1;
     }
 

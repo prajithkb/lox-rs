@@ -91,9 +91,9 @@ impl<'a> VirtualMachine<'a> {
         info!("Compiled in {} us", start_time.elapsed().as_micros());
         let start_time = Instant::now();
         self.chunk.code.set_current_index(0);
-        self.run()?;
+        let result = self.run();
         info!("Ran in {} us", start_time.elapsed().as_micros());
-        Ok(())
+        result
     }
 
     #[inline]

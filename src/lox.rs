@@ -105,13 +105,14 @@ impl<'a> Lox<'a> {
                             start_time.elapsed().as_micros()
                         );
                         let start_time = Instant::now();
-                        match self.interpreter.interpret(&statements, resolved_variables) {
+                        let r = self.interpreter.interpret(&statements, resolved_variables);
+                        info!(
+                            "Statements interpreted in {} us ({} ms)",
+                            start_time.elapsed().as_micros(),
+                            start_time.elapsed().as_millis()
+                        );
+                        match r {
                             Ok(_) => {
-                                info!(
-                                    "Statements interpreted in {} us ({} ms)",
-                                    start_time.elapsed().as_micros(),
-                                    start_time.elapsed().as_millis()
-                                );
                                 debug!("Interpreted successfully!");
                                 Ok(())
                             }
@@ -151,7 +152,7 @@ impl<'a> Lox<'a> {
             match result {
                 Ok(_) => continue,
                 Err(e) => {
-                    debug!("Command encountered error [{}], to exit press Ctrl + C", e)
+                    println!("Command encountered error [{}], to exit press Ctrl + C", e)
                 }
             };
             self.error = None;
