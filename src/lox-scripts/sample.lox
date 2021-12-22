@@ -2,15 +2,12 @@
 // Assignments
 var hello = "hello";
 var world = "world";
-print hello + " " + world;
 // expressions
 var one = 1;
 var ten = 10;
 var hundred = one + 2 * one + 3 * one + 4 * one + (9 * ten);
-print "one hundred == "+ hundred + " is " + (hundred == 100);
 var two = 2;
 if (two >= 1)
-print two + " is >=" + 1;
-
+    print "2 is >=1";
 if (1 <= two)
-print 1 + " is <=" + two;
+    print "1 is less than 2";

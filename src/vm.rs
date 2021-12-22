@@ -1,22 +1,39 @@
+use std::cell::{Ref, RefCell, RefMut};
 use std::convert::TryFrom;
 use std::f64::EPSILON;
 use std::io::{stdout, Write};
+use std::rc::Rc;
 use std::time::Instant;
 
 use log::{info, log_enabled, trace, Level};
 
-use crate::chunk::{Chunk, Object, ObjectType, Value};
+use crate::chunk::Chunk;
 use crate::compiler::Compiler;
 use crate::errors::*;
 use crate::instructions::{print_value, Opcode};
 use crate::lox::{utf8_to_string, Shared, Writer};
-use crate::objects::Values;
+use crate::objects::{Function, Object, Value, Values};
 use crate::scanner::Scanner;
 use crate::tokens::pretty_print;
+#[derive(Debug)]
+pub struct CallFrame {
+    function: Shared<Function>,
+    starting_stack_pointer: usize,
+}
+
+impl CallFrame {
+    pub fn new(function: Shared<Function>, starting_stack_pointer: usize) -> Self {
+        CallFrame {
+            function,
+            starting_stack_pointer,
+        }
+    }
+}
 
 pub struct VirtualMachine<'a> {
     chunk: Chunk,
-    stack: Vec<StackValue>,
+    stack: Vec<Value>,
+    call_frames: Vec<CallFrame>,
     runtime_values: Values,
     custom_writer: Writer<'a>,
 }
@@ -24,41 +41,9 @@ pub struct VirtualMachine<'a> {
 impl<'a> std::fmt::Debug for VirtualMachine<'a> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("VirtualMachine")
-            .field("chunk", &self.chunk)
             .field("stack", &self.stack)
             .field("runtime_values", &self.runtime_values)
             .finish()
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum StackValue {
-    Owned(Value),
-    Shared(Shared<Value>),
-}
-
-// impl StackValue {
-//     fn as_shared(self) -> StackValue {
-//         let v = Values::as_shared(self);
-//         StackValue::Shared(v)
-//     }
-// }
-
-impl Value {
-    pub fn as_num(&self) -> Result<f64> {
-        match &self {
-            Value::Number(f) => Ok(*f),
-            _ => bail!(ErrorKind::RuntimeError("Not a number".to_string())),
-        }
-    }
-
-    pub fn as_string(&self) -> Result<String> {
-        match &self {
-            Value::Object(o) => match &o.object_type {
-                ObjectType::String(s) => Ok(s.clone()),
-            },
-            _ => bail!(ErrorKind::RuntimeError("Not a String".to_string())),
-        }
     }
 }
 
@@ -72,6 +57,7 @@ impl<'a> VirtualMachine<'a> {
         VirtualMachine {
             chunk: Chunk::default(),
             stack: Vec::new(),
+            call_frames: Vec::new(),
             runtime_values: Values::new(),
             custom_writer,
         }
@@ -87,7 +73,10 @@ impl<'a> VirtualMachine<'a> {
         }
         let start_time = Instant::now();
         let compiler = Compiler::new(tokens);
-        self.chunk = compiler.compile()?;
+        let function = Rc::new(RefCell::new(compiler.compile()?));
+        self.push(Value::Object(Object::Function(function.clone())));
+        let call_frame = CallFrame::new(function, 0);
+        self.call_frames.push(call_frame);
         info!("Compiled in {} us", start_time.elapsed().as_micros());
         let start_time = Instant::now();
         self.chunk.code.set_current_index(0);
@@ -96,9 +85,31 @@ impl<'a> VirtualMachine<'a> {
         result
     }
 
+    fn call_frame_mut(&mut self) -> &mut CallFrame {
+        self.call_frame_peek_at_mut(0)
+    }
+
+    fn call_frame(&self) -> &CallFrame {
+        self.call_frame_peek_at(0)
+    }
+
+    fn call_frame_peek_at_mut(&mut self, index: usize) -> &mut CallFrame {
+        let len = self.call_frames.len();
+        self.call_frames
+            .get_mut(len - 1 - index)
+            .expect("Expected a call frame")
+    }
+
+    fn call_frame_peek_at(&self, index: usize) -> &CallFrame {
+        let len = self.call_frames.len();
+        self.call_frames
+            .get(len - 1 - index)
+            .expect("Expected a call frame")
+    }
+
     #[inline]
     fn ip(&self) -> usize {
-        self.chunk.code.read_index
+        self.current_chunk().code.read_index
     }
 
     #[inline]
@@ -108,29 +119,69 @@ impl<'a> VirtualMachine<'a> {
     }
 
     #[inline]
+    fn decrement_ip_by(&mut self, offset: u16) {
+        let ip = self.ip();
+        self.set_ip(ip - offset as usize);
+    }
+
+    #[inline]
     fn set_ip(&mut self, index: usize) {
-        self.chunk.code.read_index = index;
+        self.current_chunk_mut().code.read_index = index;
     }
 
     #[inline]
     fn read_byte(&mut self) -> u8 {
-        *self.chunk.code.read_and_increment()
+        let mut chunk = self.current_chunk_mut();
+        let v = &mut chunk.code;
+        let v = *v.read_and_increment();
+        v
+    }
+
+    // #[inline]
+    // fn current_chunk(&mut self) -> &mut Chunk {}
+
+    fn current_chunk_mut(&mut self) -> RefMut<Chunk> {
+        let function = self.current_function_mut();
+        RefMut::map(function, |f| match f {
+            Function::UserDefined(u) => &mut u.chunk,
+        })
+    }
+
+    fn current_chunk(&self) -> Ref<Chunk> {
+        let function = self.current_function();
+        Ref::map(function, |f| match f {
+            Function::UserDefined(u) => &u.chunk,
+        })
+    }
+
+    fn current_function_mut(&mut self) -> RefMut<Function> {
+        let v = self.call_frame_mut();
+        let v = &*v.function;
+        v.borrow_mut()
+    }
+
+    fn current_function(&self) -> Ref<Function> {
+        let v = self.call_frame();
+        let v = &*v.function;
+        v.borrow()
     }
 
     #[inline]
     fn read_short(&mut self) -> u16 {
-        let first = *self.chunk.code.read_and_increment() as u16;
-        let second = *self.chunk.code.read_and_increment() as u16;
+        let first = *self.current_chunk_mut().code.read_and_increment() as u16;
+        let second = *self.current_chunk_mut().code.read_and_increment() as u16;
         first << 8 | second
     }
 
     fn run(&mut self) -> Result<()> {
+        // uncomment this line to enable logs for test
+        // let _ = env_logger::builder().is_test(true).try_init();
         loop {
             let mut buf = vec![];
-            // if log_enabled!(Level::Trace) {
-            self.chunk
-                .disassemble_instruction_with_writer(self.ip(), &mut buf);
-            // }
+            if log_enabled!(Level::Trace) {
+                self.current_chunk()
+                    .disassemble_instruction_with_writer(self.ip(), &mut buf);
+            }
             let byte = self.read_byte();
             let instruction: Opcode = Opcode::try_from(byte).map_err(|e| {
                 self.runtime_error(&format!(
@@ -142,47 +193,44 @@ impl<'a> VirtualMachine<'a> {
             })?;
             trace!(
                 "Stack: <{:?}>, heap: <{:?}>",
-                self.stack,
+                &self.stack[1..self.stack.len()],
                 self.runtime_values
             );
             trace!("Instruction: [{}]", utf8_to_string(&buf).trim());
             match instruction {
                 Opcode::Constant => {
-                    let constant = self.read_constant().clone();
-                    self.push(StackValue::Owned(constant.clone()));
+                    let mut chunk = self.current_chunk_mut();
+                    let value = chunk.read_constant();
+                    let constant = value.clone();
+                    drop(value);
+                    drop(chunk);
+                    self.push(constant);
                 }
                 Opcode::Return => {
                     return Ok(());
                 }
                 Opcode::Negate => {
-                    if let StackValue::Owned(Value::Number(v)) = self.peek_at(0) {
-                        let result = Value::Number(-*v);
-                        self.push(StackValue::Owned(result));
+                    if let Value::Number(v) = self.peek_at(0) {
+                        let result = Value::Number(-v);
+                        self.push(result);
                     } else {
                         bail!(self.runtime_error("Can only negate numbers."));
                     }
                 }
-                Opcode::Add => {
-                    if self.str_add().is_err()
-                        && self.binary_op(|a, b| Value::Number(a + b)).is_err()
-                    {
-                        bail!(self
-                            .runtime_error("Can perform '+' only if both are numbers or strings"))
-                    }
-                }
+                Opcode::Add => self.add()?,
                 Opcode::Subtract => self.binary_op(|a, b| Value::Number(a - b))?,
                 Opcode::Multiply => self.binary_op(|a, b| Value::Number(a * b))?,
                 Opcode::Divide => self.binary_op(|a, b| Value::Number(a / b))?,
-                Opcode::Nil => self.push(StackValue::Owned(Value::Nil)),
-                Opcode::True => self.push(StackValue::Owned(Value::Bool(true))),
-                Opcode::False => self.push(StackValue::Owned(Value::Bool(false))),
+                Opcode::Nil => self.push(Value::Nil),
+                Opcode::True => self.push(Value::Bool(true)),
+                Opcode::False => self.push(Value::Bool(false)),
                 Opcode::Not => {
                     let v = self.pop();
-                    self.push(StackValue::Owned(Value::Bool(is_falsey(&v))))
+                    self.push(Value::Bool(is_falsey(&v)))
                 }
                 Opcode::BangEqual => {
                     let v = self.equals()?;
-                    self.push(StackValue::Owned(Value::Bool(!v)))
+                    self.push(Value::Bool(!v))
                 }
                 Opcode::Greater => self.binary_op(|a, b| Value::Bool(a > b))?,
                 Opcode::GreaterEqual => self.binary_op(|a, b| Value::Bool(a >= b))?,
@@ -190,7 +238,7 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::LessEqual => self.binary_op(|a, b| Value::Bool(a <= b))?,
                 Opcode::EqualEqual => {
                     let v = self.equals()?;
-                    self.push(StackValue::Owned(Value::Bool(v)))
+                    self.push(Value::Bool(v))
                 }
                 Opcode::Print => {
                     let v = self.pop();
@@ -201,33 +249,33 @@ impl<'a> VirtualMachine<'a> {
                     self.pop();
                 }
                 Opcode::DefineGlobal => {
-                    let name = self.read_string()?.to_string();
+                    let name = self.read_string()?;
                     let value = self.pop();
                     self.runtime_values.insert(name, value);
                 }
                 Opcode::GetGlobal => {
-                    let name = self.read_string()?.to_string();
+                    let name = self.read_string()?;
                     let value = self.runtime_values.get(&name);
                     if let Some(v) = value {
                         let v = v.clone();
-                        self.push(StackValue::Shared(v))
+                        self.push(v)
                     } else {
-                        bail!(self.runtime_error(&format!("Undefined variable {}", name)))
+                        bail!(self
+                            .runtime_error(&format!("Undefined variable '{}'", (*name).borrow())))
                     }
                 }
                 Opcode::SetGlobal => {
-                    let name = self.read_string()?.to_string();
-                    let value = self.pop();
+                    let name = self.read_string()?;
+                    let value = self.peek_at(0).clone();
                     match self.runtime_values.get_mut(&name) {
                         Some(e) => {
-                            let v = Values::as_shared(value);
-                            *e = v.clone();
-                            self.push(StackValue::Shared(v));
+                            *e = value;
                         }
                         None => {
-                            // push the value back
-                            self.push(value);
-                            bail!(self.runtime_error(&format!("Undefined variable {}", name)))
+                            bail!(self.runtime_error(&format!(
+                                "Undefined variable '{}'",
+                                (*name).borrow()
+                            )))
                         }
                     }
                 }
@@ -250,47 +298,67 @@ impl<'a> VirtualMachine<'a> {
                     let offset = self.read_short();
                     self.increment_ip_by(offset);
                 }
+                Opcode::JumpIfTrue => {
+                    let offset = self.read_short();
+                    if !is_falsey(self.peek_at(0)) {
+                        self.increment_ip_by(offset);
+                    }
+                }
+                Opcode::Loop => {
+                    let offset = self.read_short();
+                    self.decrement_ip_by(offset);
+                }
             };
         }
     }
 
-    // fn convert_to_shared(&mut self, index: usize) -> StackValue {
-    //     let v = &self.stack[index as usize];
-    //     match v {
-    //         StackValue::Owned(_) => {
-    //             let v = std::mem::replace(
-    //                 &mut self.stack[index as usize],
-    //                 StackValue::Owned(Value::Nil),
-    //             );
-    //             let shared_value = v.as_shared();
-    //             let _ = std::mem::replace(&mut self.stack[index as usize], shared_value);
-    //             self.stack[index as usize].clone()
-    //         }
-    //         StackValue::Shared(v) => StackValue::Shared(v.clone()),
-    //     }
-    // }
-
-    fn read_string(&mut self) -> Result<&str> {
-        let v = self.read_object()?;
-        match &v.object_type {
-            ObjectType::String(s) => Ok(s),
-        }
-    }
-
-    fn read_object(&mut self) -> Result<&Object> {
-        let line = self.chunk.current_line();
-        let c = self.read_constant();
-        if let Value::Object(c) = c {
-            Ok(c)
+    fn read_string(&mut self) -> Result<Shared<String>> {
+        let mut chunk = self.current_chunk_mut();
+        let constant = chunk.read_constant();
+        let nil = &Object::Nil;
+        let object = Ref::map(constant, |c| match c {
+            Value::Object(o) => o,
+            _ => nil,
+        });
+        if *object != *nil {
+            match &*object {
+                Object::String(s) => Ok(s.clone()),
+                _ => {
+                    drop(object);
+                    drop(chunk);
+                    bail!(self.runtime_error("Not a string"))
+                }
+            }
         } else {
+            drop(object);
+            drop(chunk);
+            let line = self.current_chunk().current_line();
             bail!(runtime_vm_error(line, "Unable to read object"))
         }
     }
+
+    // fn read_object<'b>(&mut self) -> Result<Ref<Object>> {
+    //     let mut chunk = self.current_chunk_mut();
+    //     let constant = chunk.read_constant();
+
+    //     let object = Ref::map(constant, |c| match c {
+    //         Value::Object(o) => o,
+    //         _ => nil,
+    //     });
+    //     if *object != *nil {
+    //         Ok(object)
+    //     } else {
+    //         drop(object);
+    //         let line = self.current_chunk().current_line();
+    //         bail!(runtime_vm_error(line, "Unable to read object"))
+    //     }
+    // }
+
     fn runtime_error(&self, message: &str) -> ErrorKind {
-        runtime_vm_error(self.chunk.current_line(), message)
+        runtime_vm_error(self.current_chunk().current_line(), message)
     }
 
-    fn peek_at(&self, distance: usize) -> &StackValue {
+    fn peek_at(&self, distance: usize) -> &Value {
         let top = self.stack.len();
         self.stack.get(top - 1 - distance).expect("Out of bounds")
     }
@@ -298,91 +366,31 @@ impl<'a> VirtualMachine<'a> {
     fn equals(&mut self) -> Result<bool> {
         let left = self.pop();
         let right = self.pop();
-        match (left, right) {
-            (StackValue::Owned(left), StackValue::Owned(right)) => value_equals(&left, &right),
-            (StackValue::Shared(left), StackValue::Shared(right)) => {
-                value_equals(&*left.borrow(), &*right.borrow())
-            }
-            (StackValue::Shared(left), StackValue::Owned(right)) => {
-                value_equals(&*left.borrow(), &right)
-            }
-            (StackValue::Owned(left), StackValue::Shared(right)) => {
-                value_equals(&left, &*right.borrow())
-            }
-        }
+        value_equals(left, right)
     }
 
     fn binary_op(&mut self, op: fn(f64, f64) -> Value) -> Result<()> {
-        let (left, right) = match (self.peek_at(1), self.peek_at(0)) {
-            (StackValue::Owned(l), StackValue::Owned(r)) => {
-                let left = l.as_num();
-                let right = r.as_num();
-                (left, right)
-            }
-
-            (StackValue::Owned(l), StackValue::Shared(r)) => {
-                let left = l.as_num();
-                let right = r.borrow().as_num();
-                (left, right)
-            }
-            (StackValue::Shared(l), StackValue::Owned(r)) => {
-                let left = l.borrow().as_num();
-                let right = r.as_num();
-                (left, right)
-            }
-            (StackValue::Shared(l), StackValue::Shared(r)) => {
-                let left = l.borrow().as_num();
-                let right = r.borrow().as_num();
-                (left, right)
-            }
+        let (left, right) = (self.peek_at(1), self.peek_at(0));
+        let (left, right) = match (left, right) {
+            (Value::Number(l), Value::Number(r)) => (*l, *r),
+            _ => bail!(self.runtime_error("Can perform binary operations only on numbers.")),
         };
-        if let (Ok(left), Ok(right)) = (left, right) {
-            self.binary_op_with_num(left, right, op)
-        } else {
-            bail!(self.runtime_error("Can perform binary operations only on numbers."))
-        }
+        self.binary_op_with_num(left, right, op)
     }
-
-    fn str_add(&mut self) -> Result<()> {
-        let (left, right) = match (self.peek_at(1), self.peek_at(0)) {
-            (StackValue::Owned(l), StackValue::Owned(r)) => {
-                let left = l.as_string();
-                let right = r.as_string();
-                (left, right)
+    fn add(&mut self) -> Result<()> {
+        match (self.peek_at(1), self.peek_at(0)) {
+            (Value::Object(Object::String(left)), Value::Object(Object::String(right))) => {
+                let mut concatenated_string = String::new();
+                concatenated_string.push_str((&**left).borrow().as_str());
+                concatenated_string.push_str((&**right).borrow().as_str());
+                self.pop();
+                self.pop();
+                self.push(Value::Object(Object::string(concatenated_string)));
+                Ok(())
             }
-
-            (StackValue::Owned(l), StackValue::Shared(r)) => {
-                let left = l.as_string();
-                let right = r.borrow().as_string();
-                (left, right)
-            }
-            (StackValue::Shared(l), StackValue::Owned(r)) => {
-                let left = l.borrow().as_string();
-                let right = r.as_string();
-                (left, right)
-            }
-            (StackValue::Shared(l), StackValue::Shared(r)) => {
-                let left = l.borrow().as_string();
-                let right = r.borrow().as_string();
-                (left, right)
-            }
-        };
-        if let (Ok(left), Ok(right)) = (left, right) {
-            self.strings_add_with_str(left, right);
-            Ok(())
-        } else {
-            bail!(self.runtime_error("Can perform binary operations only on numbers."))
+            (Value::Number(_), Value::Number(_)) => self.binary_op(|a, b| Value::Number(a + b)),
+            _ => bail!(self.runtime_error("Add can be perfomed only on numbers or strings")),
         }
-    }
-
-    fn strings_add_with_str(&mut self, mut l: String, r: String) {
-        self.pop();
-        self.pop();
-        l.push_str(&r);
-        self.push(StackValue::Owned(Value::Object(Object::new(
-            1,
-            ObjectType::String(l),
-        ))));
     }
 
     fn binary_op_with_num(
@@ -391,22 +399,23 @@ impl<'a> VirtualMachine<'a> {
         right: f64,
         op: fn(f64, f64) -> Value,
     ) -> Result<()> {
-        let result = StackValue::Owned(op(left, right));
+        let result = op(left, right);
         self.pop();
         self.pop();
         self.push(result);
         Ok(())
     }
 
-    fn read_constant(&mut self) -> &Value {
-        self.chunk.read_constant()
-    }
+    // fn read_constant(&mut self) -> Ref<Value> {
+    //     let mut chunk = self.current_chunk_mut();
+    //     let value = chunk.read_constant();
+    // }
 
-    fn push(&mut self, value: StackValue) {
+    fn push(&mut self, value: Value) {
         self.stack.push(value);
     }
 
-    fn pop(&mut self) -> StackValue {
+    fn pop(&mut self) -> Value {
         self.stack.pop().expect("Cannot be empty")
     }
 
@@ -421,10 +430,10 @@ impl<'a> VirtualMachine<'a> {
     // }
 
     pub fn free(&mut self) {
-        self.chunk.free_all();
+        self.current_chunk_mut().free_all();
     }
 
-    fn print_stack_value(&mut self, value: &StackValue) {
+    fn print_stack_value(&mut self, value: &Value) {
         match self.custom_writer.as_deref_mut() {
             Some(w) => print_stack_value(value, w),
             None => print_stack_value(value, &mut stdout()),
@@ -442,39 +451,32 @@ fn runtime_vm_error(line: usize, message: &str) -> ErrorKind {
     ErrorKind::RuntimeError(format!("Line: {}, message: {}", line, message))
 }
 
-fn equals(l: f64, r: f64) -> bool {
+fn num_equals(l: f64, r: f64) -> bool {
     (l - r).abs() < EPSILON
 }
-fn value_equals(l: &Value, r: &Value) -> Result<bool> {
+fn value_equals(l: Value, r: Value) -> Result<bool> {
     match (l, r) {
         (Value::Bool(l), Value::Bool(r)) => Ok(l == r),
         (Value::Nil, Value::Nil) => Ok(true),
-        (Value::Number(l), Value::Number(r)) => Ok(equals(*l, *r)),
-        (Value::Object(l), Value::Object(r)) => match (&l.object_type, &r.object_type) {
-            (ObjectType::String(l), ObjectType::String(r)) => Ok(l == r),
+        (Value::Number(l), Value::Number(r)) => Ok(num_equals(l, r)),
+        (Value::Object(l), Value::Object(r)) => match (l, r) {
+            (Object::String(l), Object::String(r)) => Ok(l == r),
+            _ => Ok(false),
         },
         _ => Ok(false),
     }
 }
 
-fn is_falsey(value: &StackValue) -> bool {
+fn is_falsey(value: &Value) -> bool {
     match value {
-        StackValue::Owned(Value::Bool(b)) => !b,
-        StackValue::Owned(Value::Nil) => true,
-        StackValue::Shared(v) => match *v.borrow() {
-            Value::Bool(b) => !b,
-            Value::Nil => true,
-            _ => false,
-        },
+        Value::Bool(b) => !b,
+        Value::Nil => true,
         _ => false,
     }
 }
 
-fn print_stack_value(value: &StackValue, writer: &mut dyn Write) {
-    match value {
-        StackValue::Owned(v) => print_value(v, writer),
-        StackValue::Shared(v) => print_value(&v.borrow(), writer),
-    }
+fn print_stack_value(value: &Value, writer: &mut dyn Write) {
+    print_value(value, writer);
 }
 
 #[cfg(test)]
@@ -558,7 +560,7 @@ mod tests {
         match vm.interpret(source.to_string()) {
             Ok(_) => panic!("Expected to fail"),
             Err(e) => assert_eq!(
-                "Runtime Error: Line: 10, message: Undefined variable b",
+                "Runtime Error: Line: 10, message: Undefined variable 'b'",
                 e.to_string()
             ),
         }
@@ -601,6 +603,38 @@ mod tests {
         "#;
         vm.interpret(source.to_string())?;
         assert_eq!("if\nelse\n", utf8_to_string(&buf));
+        Ok(())
+    }
+
+    #[test]
+    fn vm_logical_operations() -> Result<()> {
+        let mut buf = vec![];
+        let mut vm = VirtualMachine::new_with_writer(Some(&mut buf));
+        let source = r#"
+        print 2 or 3;
+        print 2 and 3;
+        "#;
+        vm.interpret(source.to_string())?;
+        assert_eq!("2\n3\n", utf8_to_string(&buf));
+        Ok(())
+    }
+
+    #[test]
+    fn vm_while_loop() -> Result<()> {
+        let mut buf = vec![];
+        let mut vm = VirtualMachine::new_with_writer(Some(&mut buf));
+        let source = r#"
+        var a = 5;
+        var b = 1;
+        while (a == 5) {
+            print b;
+            b = b + 1;
+            if (b > 5)
+                a = "stop";
+        }
+        "#;
+        vm.interpret(source.to_string())?;
+        assert_eq!("1\n2\n3\n4\n5\n", utf8_to_string(&buf));
         Ok(())
     }
 }

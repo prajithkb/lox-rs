@@ -2,7 +2,7 @@ use std::{convert::TryFrom, fmt::Display, io::Write};
 
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use crate::chunk::{Chunk, Value};
+use crate::{chunk::Chunk, objects::Value};
 
 #[derive(Debug, PartialEq, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
 #[repr(u8)]
@@ -32,7 +32,9 @@ pub enum Opcode {
     GetLocal,
     SetLocal,
     JumpIfFalse,
+    JumpIfTrue,
     Jump,
+    Loop,
 }
 
 impl Display for Opcode {
@@ -54,7 +56,7 @@ pub fn constant_instruction(
 ) -> usize {
     let constant = *chunk.code.read_item_at(offset + 1);
     write!(writer, "{:<30} {:4} '", instruction.to_string(), constant).expect("Write failed");
-    print_value(chunk.constants.read_item_at(constant as usize), writer);
+    print_value(&chunk.constants.read_item_at(constant as usize), writer);
     writeln!(writer, "'").expect("Write failed");
     offset + 2
 }
@@ -112,10 +114,28 @@ pub fn disassemble_instruction(
             Opcode::SetLocal | Opcode::GetLocal => {
                 byte_instruction(&instruction, chunk, offset, writer)
             }
-            Opcode::Jump | Opcode::JumpIfFalse => {
+            Opcode::Jump | Opcode::JumpIfFalse | Opcode::JumpIfTrue => {
                 jump_instruction(&instruction, chunk, 1, offset, writer)
             }
-            _ => simple_instruction(&instruction, offset, writer),
+            Opcode::Loop => jump_instruction(&instruction, chunk, -1, offset, writer),
+            Opcode::Return => simple_instruction(&instruction, offset, writer),
+            Opcode::Add => simple_instruction(&instruction, offset, writer),
+            Opcode::Subtract => simple_instruction(&instruction, offset, writer),
+            Opcode::Multiply => simple_instruction(&instruction, offset, writer),
+            Opcode::Divide => simple_instruction(&instruction, offset, writer),
+            Opcode::Negate => simple_instruction(&instruction, offset, writer),
+            Opcode::Nil => simple_instruction(&instruction, offset, writer),
+            Opcode::True => simple_instruction(&instruction, offset, writer),
+            Opcode::False => simple_instruction(&instruction, offset, writer),
+            Opcode::Not => simple_instruction(&instruction, offset, writer),
+            Opcode::EqualEqual => simple_instruction(&instruction, offset, writer),
+            Opcode::BangEqual => simple_instruction(&instruction, offset, writer),
+            Opcode::Greater => simple_instruction(&instruction, offset, writer),
+            Opcode::GreaterEqual => simple_instruction(&instruction, offset, writer),
+            Opcode::Less => simple_instruction(&instruction, offset, writer),
+            Opcode::LessEqual => simple_instruction(&instruction, offset, writer),
+            Opcode::Print => simple_instruction(&instruction, offset, writer),
+            Opcode::Pop => simple_instruction(&instruction, offset, writer),
         },
         Err(e) => {
             eprintln!(

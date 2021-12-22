@@ -45,8 +45,8 @@ impl<'a> Lox<'a> {
         }
     }
 
-    pub fn run_script(&mut self, script: &str, run_type: LoxRunType) -> Result<()> {
-        let mut script = File::open(script).chain_err(|| "Unable to create file")?;
+    pub fn run_script(&mut self, path: &str, run_type: LoxRunType) -> Result<()> {
+        let mut script = File::open(path).chain_err(|| "Unable to create file")?;
         let mut script_contents = String::new();
         if script
             .read_to_string(&mut script_contents)
@@ -65,13 +65,9 @@ impl<'a> Lox<'a> {
     pub fn run_script_with_exit_code(&mut self, script: &str, run_type: LoxRunType) {
         match self.run_script(script, run_type) {
             Ok(_) => exit(0),
-            Err(_) => {
-                if let Some(lox_error) = &self.error {
-                    match lox_error {
-                        LoxError::RuntimeError => exit(65),
-                        LoxError::SyntaxError => exit(75),
-                    }
-                }
+            Err(e) => {
+                eprint!("Error: {}", e);
+                exit(-1);
             }
         }
     }

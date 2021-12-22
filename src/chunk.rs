@@ -1,46 +1,12 @@
 use std::{
-    fmt::Display,
+    cell::{Ref, RefCell},
     io::{stdout, Write},
 };
 
-use crate::instructions::{self};
-
-#[derive(Debug, Clone)]
-pub enum Value {
-    Bool(bool),
-    Nil,
-    Number(f64),
-    Object(Object),
-}
-
-impl Display for Value {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Value::Bool(b) => f.write_str(&b.to_string()),
-            Value::Nil => f.write_str("nil"),
-            Value::Number(n) => f.write_str(&n.to_string()),
-            Value::Object(o) => match &o.object_type {
-                ObjectType::String(s) => f.write_str(s),
-            },
-        }
-    }
-}
-#[derive(Debug, Clone)]
-pub struct Object {
-    pub id: usize,
-    pub object_type: ObjectType,
-}
-
-impl Object {
-    pub fn new(id: usize, object_type: ObjectType) -> Self {
-        Object { id, object_type }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub enum ObjectType {
-    String(String),
-}
+use crate::{
+    instructions::{self},
+    objects::Value,
+};
 
 #[derive(Debug, Clone)]
 pub struct Chunk {
@@ -72,7 +38,7 @@ impl Chunk {
     }
 
     #[inline]
-    pub fn read_constant(&mut self) -> &Value {
+    pub fn read_constant(&mut self) -> Ref<Value> {
         let offset = *self.code.read_and_increment();
         self.constants.read_item_at(offset as usize)
     }
@@ -128,7 +94,7 @@ impl Chunk {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Memory<T> {
-    inner: Vec<T>,
+    inner: Vec<RefCell<T>>,
     pub count: usize,
     pub read_index: usize,
 }
@@ -143,13 +109,13 @@ impl<T> Memory<T> {
         }
     }
 
-    pub fn values_mut(&mut self) -> &mut Vec<T> {
+    pub fn values_mut(&mut self) -> &mut Vec<RefCell<T>> {
         &mut self.inner
     }
 
     #[inline]
     pub fn write_item(&mut self, item: T) {
-        self.inner.push(item);
+        self.inner.push(RefCell::new(item));
         self.count += 1;
     }
 
@@ -158,14 +124,18 @@ impl<T> Memory<T> {
         self.read_index = index
     }
     #[inline]
-    pub fn read_item_at(&self, index: usize) -> &T {
-        self.inner.get(index).expect("Index out of bounds")
+    pub fn read_item_at(&self, index: usize) -> Ref<T> {
+        self.inner.get(index).expect("Index out of bounds").borrow()
     }
 
     #[inline]
-    pub fn read_and_increment(&mut self) -> &T {
+    pub fn read_and_increment(&mut self) -> Ref<T> {
         self.read_index += 1;
         self.read_item_at(self.read_index - 1)
+    }
+
+    pub fn insert_at(&mut self, index: usize, v: T) {
+        self.inner[index] = RefCell::new(v);
     }
 
     pub fn free_items(&mut self) {
@@ -177,10 +147,7 @@ impl<T> Memory<T> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        chunk::{Chunk, Value},
-        errors::*,
-        instructions::Opcode,
-        lox::utf8_to_string,
+        chunk::Chunk, errors::*, instructions::Opcode, lox::utf8_to_string, objects::Value,
     };
 
     #[test]

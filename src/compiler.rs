@@ -2,9 +2,10 @@ use log::log_enabled;
 use num_enum::{FromPrimitive, IntoPrimitive};
 
 use crate::{
-    chunk::{Chunk, Object, ObjectType, Value},
+    chunk::Chunk,
     errors::*,
     instructions::Opcode,
+    objects::{shared, Function, Object, UserDefinedFunction, Value},
     tokens::{Literal, TokenType},
 };
 
@@ -93,15 +94,20 @@ const GLOBAL_SCOPE_DEPTH: usize = 0;
 
 #[derive(Debug)]
 struct Local<'a> {
-    name: &'a Token,
+    name: &'a str,
     depth: Option<usize>,
 }
 
 impl<'a> Local<'a> {
     #[allow(clippy::new_without_default)]
-    fn new(name: &'a Token, depth: Option<usize>) -> Self {
+    fn new(name: &'a str, depth: Option<usize>) -> Self {
         Local { name, depth }
     }
+}
+#[derive(Debug)]
+pub enum FunctionType {
+    Script,
+    _UserDefined,
 }
 
 #[derive(Debug)]
@@ -111,17 +117,32 @@ pub struct Compiler<'a> {
     current_index: usize,
     parse_rules: Vec<ParseRule<'a>>,
     current_scope: Scope<'a>,
+    function: Function,
+    function_type: FunctionType,
 }
 #[allow(dead_code)]
 impl<'a> Compiler<'a> {
     pub fn new(tokens: &'a [Token]) -> Self {
+        Compiler::new_with_type(tokens, FunctionType::Script)
+    }
+
+    pub fn new_with_type(tokens: &'a [Token], function_type: FunctionType) -> Self {
         let mut c = Compiler {
             tokens,
             compiling_chunk: Chunk::default(),
             current_index: 0,
             parse_rules: Vec::new(),
             current_scope: Scope::new(),
+            function: Function::UserDefined(UserDefinedFunction::new(
+                None,
+                0,
+                Chunk::new(),
+                shared("".to_string()),
+            )),
+            function_type,
         };
+        //TBD;
+        c.current_scope.locals.push(Local::new("", Some(0)));
         c.init_parse_rules();
         c
     }
@@ -191,8 +212,8 @@ impl<'a> Compiler<'a> {
             ),
             ParseRule::new(
                 TokenType::GreaterEqual,
-                Some(Compiler::binary),
                 None,
+                Some(Compiler::binary),
                 Precedence::Comparison,
             ),
             ParseRule::new(
@@ -225,7 +246,12 @@ impl<'a> Compiler<'a> {
                 None,
                 Precedence::None,
             ),
-            ParseRule::new(TokenType::And, None, None, Precedence::None),
+            ParseRule::new(
+                TokenType::And,
+                None,
+                Some(Compiler::logical_and),
+                Precedence::And,
+            ),
             ParseRule::new(TokenType::Class, None, None, Precedence::None),
             ParseRule::new(TokenType::Else, None, None, Precedence::None),
             ParseRule::new(
@@ -243,7 +269,12 @@ impl<'a> Compiler<'a> {
                 None,
                 Precedence::None,
             ),
-            ParseRule::new(TokenType::Or, None, None, Precedence::None),
+            ParseRule::new(
+                TokenType::Or,
+                None,
+                Some(Compiler::logical_or),
+                Precedence::Or,
+            ),
             ParseRule::new(TokenType::Print, None, None, Precedence::None),
             ParseRule::new(TokenType::Return, None, None, Precedence::None),
             ParseRule::new(TokenType::Super, None, None, Precedence::None),
@@ -260,12 +291,12 @@ impl<'a> Compiler<'a> {
         ]
     }
 
-    pub fn compile(mut self) -> Result<Chunk> {
+    pub fn compile(mut self) -> Result<Function> {
         while !self.is_at_end() {
             self.declaration()?;
         }
         self.end_compiler();
-        Ok(self.compiling_chunk)
+        Ok(self.function)
     }
 
     fn declaration(&mut self) -> Result<()> {
@@ -320,7 +351,7 @@ impl<'a> Compiler<'a> {
         let mut i = self.current_scope.locals.len() as i32 - 1;
         while i >= 0 {
             let index = i as usize;
-            if self.current_scope.locals[index].name.lexeme == name.lexeme {
+            if self.current_scope.locals[index].name == name.lexeme {
                 if self.current_scope.locals[index].depth.is_none() {
                     bail!(parse_error(
                         name,
@@ -347,6 +378,8 @@ impl<'a> Compiler<'a> {
             self.print_statement()?;
         } else if self.match_and_advance(&[TokenType::If]) {
             self.if_statement()?;
+        } else if self.match_and_advance(&[TokenType::While]) {
+            self.while_statement()?;
         } else if self.match_and_advance(&[TokenType::LeftBrace]) {
             self.begin_scope();
             self.block()?;
@@ -354,6 +387,20 @@ impl<'a> Compiler<'a> {
         } else {
             self.expression_statement()?;
         }
+        Ok(())
+    }
+
+    fn while_statement(&mut self) -> Result<()> {
+        let loop_start = self.current_chunk().code.count;
+        self.consume_next_token(TokenType::LeftParen, "Expect '(' after while")?;
+        self.expression()?;
+        self.consume_next_token(TokenType::RightParen, "Expect ')' after condition")?;
+        let exit_jump = self.emit_jump(Opcode::JumpIfFalse);
+        self.emit_op_code(Opcode::Pop);
+        self.statement()?;
+        self.emit_loop(loop_start);
+        self.patch_jump(exit_jump)?;
+        self.emit_op_code(Opcode::Pop);
         Ok(())
     }
 
@@ -459,7 +506,7 @@ impl<'a> Compiler<'a> {
 
     fn string(&mut self, _can_assign: bool) -> Result<()> {
         if let Some(Literal::String(s)) = &self.previous().literal {
-            let value = Value::Object(Object::new(1, ObjectType::String(s.to_string())));
+            let value = Value::Object(Object::string(s.to_string()));
             self.emit_constant(value);
             Ok(())
         } else {
@@ -519,6 +566,21 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
+    fn logical_and(&mut self, _can_assign: bool) -> Result<()> {
+        let if_left_is_false = self.emit_jump(Opcode::JumpIfFalse);
+        self.emit_op_code(Opcode::Pop);
+        self.parse_precedence(Precedence::Or)?;
+        self.patch_jump(if_left_is_false)?;
+        Ok(())
+    }
+    fn logical_or(&mut self, _can_assign: bool) -> Result<()> {
+        let if_left_is_true = self.emit_jump(Opcode::JumpIfTrue);
+        self.emit_op_code(Opcode::Pop);
+        self.parse_precedence(Precedence::Or)?;
+        self.patch_jump(if_left_is_true)?;
+        Ok(())
+    }
+
     #[inline]
     fn get_rule(&mut self, token_type: TokenType) -> &ParseRule<'a> {
         let index: usize = token_type.into();
@@ -534,12 +596,20 @@ impl<'a> Compiler<'a> {
     }
 
     #[inline]
+    fn emit_loop(&mut self, loop_start: usize) {
+        self.emit_op_code(Opcode::Loop);
+        let jump = self.current_chunk().code.count - loop_start + 2;
+        let (first, second) = as_two_bytes(jump);
+        self.emit_byte(first);
+        self.emit_byte(second);
+    }
+
+    #[inline]
     fn patch_jump(&mut self, offset: usize) -> Result<()> {
         let jump = self.current_chunk().code.count - offset - 2;
-        let first = ((jump >> 8) & 0xff) as u8;
-        let second = (jump & 0xff) as u8;
-        self.current_chunk().code.values_mut()[offset] = first;
-        self.current_chunk().code.values_mut()[offset + 1] = second;
+        let (first, second) = as_two_bytes(jump);
+        self.current_chunk().code.insert_at(offset, first);
+        self.current_chunk().code.insert_at(offset + 1, second);
         Ok(())
     }
 
@@ -557,7 +627,17 @@ impl<'a> Compiler<'a> {
     fn end_compiler(&mut self) {
         self.emit_return();
         if log_enabled!(log::Level::Trace) {
-            self.current_chunk().disassemble_chunk("code");
+            let mut function_name = match &self.function {
+                Function::UserDefined(u) => {
+                    let s = &*u.name;
+                    let name = s.borrow();
+                    name.to_string()
+                }
+            };
+            if function_name.is_empty() {
+                function_name = "<script>".to_string();
+            }
+            self.current_chunk().disassemble_chunk(&function_name);
             println!("==========")
         }
     }
@@ -583,7 +663,7 @@ impl<'a> Compiler<'a> {
                     if *depth < self.current_scope.depth {
                         break;
                     }
-                    if local.name.lexeme == token.lexeme {
+                    if local.name == token.lexeme {
                         bail!(parse_error(
                             token,
                             "Already a variable with this name exists in this scope"
@@ -597,7 +677,7 @@ impl<'a> Compiler<'a> {
     }
 
     fn add_local(&mut self, token: &'a Token) {
-        let local = Local::new(token, None);
+        let local = Local::new(&token.lexeme, None);
         self.current_scope.locals.push(local);
     }
 
@@ -609,7 +689,7 @@ impl<'a> Compiler<'a> {
     fn identifier_constant(&mut self, mut token: Token) -> Result<u8> {
         let literal = token.literal.take();
         if let Literal::Identifier(s) = literal.expect("Expect string") {
-            let name = Value::Object(Object::new(1, ObjectType::String(s)));
+            let name = Value::Object(Object::string(s));
             Ok(self.add_constant(name))
         } else {
             bail!(parse_error(&token, "Expect identifier"))
@@ -638,7 +718,9 @@ impl<'a> Compiler<'a> {
 
     #[inline]
     fn current_chunk(&mut self) -> &mut Chunk {
-        &mut self.compiling_chunk
+        match &mut self.function {
+            Function::UserDefined(u) => &mut u.chunk,
+        }
     }
 
     fn consume_next_token(
@@ -713,9 +795,16 @@ impl<'a> Compiler<'a> {
     }
 }
 
+#[inline]
+fn as_two_bytes(jump: usize) -> (u8, u8) {
+    let first = ((jump >> 8) & 0xff) as u8;
+    let second = (jump & 0xff) as u8;
+    (first, second)
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::{errors::*, lox::utf8_to_string, scanner::Scanner};
+    use crate::{errors::*, lox::utf8_to_string, objects::Function::UserDefined, scanner::Scanner};
 
     use super::Compiler;
 
@@ -725,9 +814,11 @@ mod tests {
         let mut scanner = Scanner::new(source.to_string());
         let tokens = scanner.scan_tokens()?;
         let compiler = Compiler::new(tokens);
-        let chunk = compiler.compile()?;
+        let function = compiler.compile()?;
         let mut buf = vec![];
-        chunk.disassemble_chunk_with_writer("test", &mut buf);
+        match &function {
+            UserDefined(u) => u.chunk.disassemble_chunk_with_writer("test", &mut buf),
+        }
         assert_eq!(
             r#"== test ==
 0000 0001 OpCode[Constant]                  0 '3.14'
@@ -745,9 +836,11 @@ mod tests {
         let mut scanner = Scanner::new(source.to_string());
         let tokens = scanner.scan_tokens()?;
         let compiler = Compiler::new(tokens);
-        let chunk = compiler.compile()?;
+        let function = compiler.compile()?;
         let mut buf = vec![];
-        chunk.disassemble_chunk_with_writer("test", &mut buf);
+        match &function {
+            UserDefined(u) => u.chunk.disassemble_chunk_with_writer("test", &mut buf),
+        }
         assert_eq!(
             r#"== test ==
 0000 0001 OpCode[Constant]                  0 '3.14'
@@ -765,9 +858,11 @@ mod tests {
         let mut scanner = Scanner::new(source.to_string());
         let tokens = scanner.scan_tokens()?;
         let compiler = Compiler::new(tokens);
-        let chunk = compiler.compile()?;
+        let function = compiler.compile()?;
         let mut buf = vec![];
-        chunk.disassemble_chunk_with_writer("test", &mut buf);
+        match &function {
+            UserDefined(u) => u.chunk.disassemble_chunk_with_writer("test", &mut buf),
+        }
         assert_eq!(
             r#"== test ==
 0000 0001 OpCode[Constant]                  0 '3.14'
@@ -786,9 +881,11 @@ mod tests {
         let mut scanner = Scanner::new(source.to_string());
         let tokens = scanner.scan_tokens()?;
         let compiler = Compiler::new(tokens);
-        let chunk = compiler.compile()?;
+        let function = compiler.compile()?;
         let mut buf = vec![];
-        chunk.disassemble_chunk_with_writer("test", &mut buf);
+        match &function {
+            UserDefined(u) => u.chunk.disassemble_chunk_with_writer("test", &mut buf),
+        }
         assert_eq!(
             r#"== test ==
 0000 0001 OpCode[Constant]                  0 '4'
@@ -810,9 +907,11 @@ mod tests {
         let mut scanner = Scanner::new(source.to_string());
         let tokens = scanner.scan_tokens()?;
         let compiler = Compiler::new(tokens);
-        let chunk = compiler.compile()?;
+        let function = compiler.compile()?;
         let mut buf = vec![];
-        chunk.disassemble_chunk_with_writer("test", &mut buf);
+        match &function {
+            UserDefined(u) => u.chunk.disassemble_chunk_with_writer("test", &mut buf),
+        }
         assert_eq!(
             r#"== test ==
 0000 0001 OpCode[Constant]                  0 '5'
@@ -840,9 +939,11 @@ mod tests {
         let mut scanner = Scanner::new(source.to_string());
         let tokens = scanner.scan_tokens()?;
         let compiler = Compiler::new(tokens);
-        let chunk = compiler.compile()?;
+        let function = compiler.compile()?;
         let mut buf = vec![];
-        chunk.disassemble_chunk_with_writer("test", &mut buf);
+        match &function {
+            UserDefined(u) => u.chunk.disassemble_chunk_with_writer("test", &mut buf),
+        }
         assert_eq!(
             r#"== test ==
 0000 0001 OpCode[Constant]                  0 'Hello '
@@ -862,9 +963,11 @@ mod tests {
         let mut scanner = Scanner::new(source.to_string());
         let tokens = scanner.scan_tokens()?;
         let compiler = Compiler::new(tokens);
-        let chunk = compiler.compile()?;
+        let function = compiler.compile()?;
         let mut buf = vec![];
-        chunk.disassemble_chunk_with_writer("test", &mut buf);
+        match &function {
+            UserDefined(u) => u.chunk.disassemble_chunk_with_writer("test", &mut buf),
+        }
         assert_eq!(
             r#"== test ==
 0000 0001 OpCode[Constant]                  0 '3'
@@ -884,9 +987,11 @@ mod tests {
         let mut scanner = Scanner::new(source.to_string());
         let tokens = scanner.scan_tokens()?;
         let compiler = Compiler::new(tokens);
-        let chunk = compiler.compile()?;
+        let function = compiler.compile()?;
         let mut buf = vec![];
-        chunk.disassemble_chunk_with_writer("test", &mut buf);
+        match &function {
+            UserDefined(u) => u.chunk.disassemble_chunk_with_writer("test", &mut buf),
+        }
         assert_eq!(
             r#"== test ==
 0000 0001 OpCode[Constant]                  1 '2'
@@ -914,10 +1019,14 @@ mod tests {
         let mut scanner = Scanner::new(source.to_string());
         let tokens = scanner.scan_tokens()?;
         let compiler = Compiler::new(tokens);
-        let chunk = compiler.compile()?;
+        let function = compiler.compile()?;
         let mut buf = vec![];
 
-        chunk.disassemble_chunk_with_writer("test", &mut buf);
+        match &function {
+            UserDefined(u) => {
+                u.chunk.disassemble_chunk_with_writer("test", &mut buf);
+            }
+        }
         assert_eq!(
             r#"== test ==
 0000 0002 OpCode[Constant]                  1 '2'
@@ -925,9 +1034,9 @@ mod tests {
 0004 0004 OpCode[GetGlobal]                 2 'a'
 0006    | OpCode[Print]
 0007 0005 OpCode[Constant]                  3 '3'
-0009 0006 OpCode[GetLocal]                  0
+0009 0006 OpCode[GetLocal]                  1
 0011    | OpCode[Print]
-0012 0007 OpCode[GetLocal]                  0
+0012 0007 OpCode[GetLocal]                  1
 0014 0008 OpCode[Pop]
 0015    | OpCode[Pop]
 0016 0009 OpCode[GetGlobal]                 4 'a'
@@ -956,9 +1065,11 @@ mod tests {
         let mut scanner = Scanner::new(source.to_string());
         let tokens = scanner.scan_tokens()?;
         let compiler = Compiler::new(tokens);
-        let chunk = compiler.compile()?;
+        let function = compiler.compile()?;
         let mut buf = vec![];
-        chunk.disassemble_chunk_with_writer("test", &mut buf);
+        match &function {
+            UserDefined(u) => u.chunk.disassemble_chunk_with_writer("test", &mut buf),
+        }
         assert_eq!(
             r#"== test ==
 0000 0002 OpCode[Constant]                  1 ''
@@ -979,6 +1090,98 @@ mod tests {
 0027 0009 OpCode[GetGlobal]                 8 'a'
 0029    | OpCode[Print]
 0030    | OpCode[Return]
+"#,
+            utf8_to_string(&buf)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn logical_or_and_and_statements() -> Result<()> {
+        let source = r#"
+        print 2 or 3;
+        "#;
+        let mut scanner = Scanner::new(source.to_string());
+        let tokens = scanner.scan_tokens()?;
+        let compiler = Compiler::new(tokens);
+        let function = compiler.compile()?;
+        let mut buf = vec![];
+        match &function {
+            UserDefined(u) => u.chunk.disassemble_chunk_with_writer("test", &mut buf),
+        }
+        assert_eq!(
+            r#"== test ==
+0000 0002 OpCode[Constant]                  0 '2'
+0002    | OpCode[JumpIfTrue]                2 -> 8
+0005    | OpCode[Pop]
+0006    | OpCode[Constant]                  1 '3'
+0008    | OpCode[Print]
+0009    | OpCode[Return]
+"#,
+            utf8_to_string(&buf)
+        );
+
+        let source = r#"
+        print 2 and 3;
+        "#;
+        let mut scanner = Scanner::new(source.to_string());
+        let tokens = scanner.scan_tokens()?;
+        let compiler = Compiler::new(tokens);
+        let function = compiler.compile()?;
+        let mut buf = vec![];
+        match &function {
+            UserDefined(u) => u.chunk.disassemble_chunk_with_writer("test", &mut buf),
+        }
+        assert_eq!(
+            r#"== test ==
+0000 0002 OpCode[Constant]                  0 '2'
+0002    | OpCode[JumpIfFalse]               2 -> 8
+0005    | OpCode[Pop]
+0006    | OpCode[Constant]                  1 '3'
+0008    | OpCode[Print]
+0009    | OpCode[Return]
+"#,
+            utf8_to_string(&buf)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn while_loop() -> Result<()> {
+        let source = r#"
+        var a = 1;
+        while (a <= 5) {
+            print a;
+            a = a +1;
+        }
+        "#;
+        let mut scanner = Scanner::new(source.to_string());
+        let tokens = scanner.scan_tokens()?;
+        let compiler = Compiler::new(tokens);
+        let function = compiler.compile()?;
+        let mut buf = vec![];
+        match &function {
+            UserDefined(u) => u.chunk.disassemble_chunk_with_writer("test", &mut buf),
+        }
+        assert_eq!(
+            r#"== test ==
+0000 0002 OpCode[Constant]                  1 '1'
+0002    | OpCode[DefineGlobal]              0 'a'
+0004 0003 OpCode[GetGlobal]                 2 'a'
+0006    | OpCode[Constant]                  3 '5'
+0008    | OpCode[LessEqual]
+0009    | OpCode[JumpIfFalse]               9 -> 27
+0012    | OpCode[Pop]
+0013 0004 OpCode[GetGlobal]                 4 'a'
+0015    | OpCode[Print]
+0016 0005 OpCode[GetGlobal]                 6 'a'
+0018    | OpCode[Constant]                  7 '1'
+0020    | OpCode[Add]
+0021    | OpCode[SetGlobal]                 5 'a'
+0023    | OpCode[Pop]
+0024 0006 OpCode[Loop]                     24 -> 4
+0027    | OpCode[Pop]
+0028    | OpCode[Return]
 "#,
             utf8_to_string(&buf)
         );
