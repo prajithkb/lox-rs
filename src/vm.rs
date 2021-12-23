@@ -1,8 +1,7 @@
-use std::cell::{Ref, RefCell, RefMut};
+use std::cell::{Ref, RefMut};
 use std::convert::TryFrom;
 use std::f64::EPSILON;
 use std::io::{stdout, Write};
-use std::rc::Rc;
 use std::time::Instant;
 
 use log::{info, log_enabled, trace, Level};
@@ -12,7 +11,7 @@ use crate::compiler::Compiler;
 use crate::errors::*;
 use crate::instructions::{print_value, Opcode};
 use crate::lox::{utf8_to_string, Shared, Writer};
-use crate::objects::{Function, Object, Value, Values};
+use crate::objects::{shared, Function, Object, Value, Values};
 use crate::scanner::Scanner;
 use crate::tokens::pretty_print;
 #[derive(Debug)]
@@ -31,7 +30,6 @@ impl CallFrame {
 }
 
 pub struct VirtualMachine<'a> {
-    chunk: Chunk,
     stack: Vec<Value>,
     call_frames: Vec<CallFrame>,
     runtime_values: Values,
@@ -55,7 +53,6 @@ impl<'a> VirtualMachine<'a> {
 
     pub fn new_with_writer(custom_writer: Writer<'a>) -> Self {
         VirtualMachine {
-            chunk: Chunk::default(),
             stack: Vec::new(),
             call_frames: Vec::new(),
             runtime_values: Values::new(),
@@ -73,33 +70,34 @@ impl<'a> VirtualMachine<'a> {
         }
         let start_time = Instant::now();
         let compiler = Compiler::new(tokens);
-        let function = Rc::new(RefCell::new(compiler.compile()?));
-        self.push(Value::Object(Object::Function(function.clone())));
-        let call_frame = CallFrame::new(function, 0);
-        self.call_frames.push(call_frame);
+        let main_function = shared(compiler.compile()?);
         info!("Compiled in {} us", start_time.elapsed().as_micros());
+        self.push(Value::Object(Object::Function(main_function.clone())));
+        self.call_frames
+            .push(CallFrame::new(main_function.clone(), 0));
+        self.call(main_function, 0)?;
         let start_time = Instant::now();
-        self.chunk.code.set_current_index(0);
         let result = self.run();
         info!("Ran in {} us", start_time.elapsed().as_micros());
         result
     }
 
+    #[inline]
     fn call_frame_mut(&mut self) -> &mut CallFrame {
         self.call_frame_peek_at_mut(0)
     }
-
+    #[inline]
     fn call_frame(&self) -> &CallFrame {
         self.call_frame_peek_at(0)
     }
-
+    #[inline]
     fn call_frame_peek_at_mut(&mut self, index: usize) -> &mut CallFrame {
         let len = self.call_frames.len();
         self.call_frames
             .get_mut(len - 1 - index)
             .expect("Expected a call frame")
     }
-
+    #[inline]
     fn call_frame_peek_at(&self, index: usize) -> &CallFrame {
         let len = self.call_frames.len();
         self.call_frames
@@ -137,9 +135,7 @@ impl<'a> VirtualMachine<'a> {
         v
     }
 
-    // #[inline]
-    // fn current_chunk(&mut self) -> &mut Chunk {}
-
+    #[inline]
     fn current_chunk_mut(&mut self) -> RefMut<Chunk> {
         let function = self.current_function_mut();
         RefMut::map(function, |f| match f {
@@ -147,6 +143,7 @@ impl<'a> VirtualMachine<'a> {
         })
     }
 
+    #[inline]
     fn current_chunk(&self) -> Ref<Chunk> {
         let function = self.current_function();
         Ref::map(function, |f| match f {
@@ -154,12 +151,13 @@ impl<'a> VirtualMachine<'a> {
         })
     }
 
+    #[inline]
     fn current_function_mut(&mut self) -> RefMut<Function> {
         let v = self.call_frame_mut();
         let v = &*v.function;
         v.borrow_mut()
     }
-
+    #[inline]
     fn current_function(&self) -> Ref<Function> {
         let v = self.call_frame();
         let v = &*v.function;
@@ -174,13 +172,14 @@ impl<'a> VirtualMachine<'a> {
     }
 
     fn run(&mut self) -> Result<()> {
-        // uncomment this line to enable logs for test
-        // let _ = env_logger::builder().is_test(true).try_init();
+        // enable_log uncomment this line to enable logs for test
+        let _ = env_logger::builder().is_test(true).try_init();
         loop {
             let mut buf = vec![];
             if log_enabled!(Level::Trace) {
+                let ip = self.ip();
                 self.current_chunk()
-                    .disassemble_instruction_with_writer(self.ip(), &mut buf);
+                    .disassemble_instruction_with_writer(ip, &mut buf);
             }
             let byte = self.read_byte();
             let instruction: Opcode = Opcode::try_from(byte).map_err(|e| {
@@ -191,12 +190,17 @@ impl<'a> VirtualMachine<'a> {
                     e
                 ))
             })?;
-            trace!(
-                "Stack: <{:?}>, heap: <{:?}>",
-                &self.stack[1..self.stack.len()],
-                self.runtime_values
-            );
-            trace!("Instruction: [{}]", utf8_to_string(&buf).trim());
+            if log_enabled!(Level::Trace) {
+                let sanitized_stack: Vec<String> =
+                    self.stack.iter().map(|v| v.to_string()).collect();
+                trace!("Current Stack: {:?}", sanitized_stack);
+                let fun_name = (*self.current_function()).to_string();
+                trace!(
+                    "In function {} Next Instruction: [{}]",
+                    fun_name,
+                    utf8_to_string(&buf).trim()
+                );
+            }
             match instruction {
                 Opcode::Constant => {
                     let mut chunk = self.current_chunk_mut();
@@ -207,7 +211,16 @@ impl<'a> VirtualMachine<'a> {
                     self.push(constant);
                 }
                 Opcode::Return => {
-                    return Ok(());
+                    let result = self.pop();
+                    let frame = self.call_frames.pop().expect("Expect frame");
+                    if self.call_frames.is_empty() {
+                        return Ok(());
+                    }
+                    let fn_starting_pointer = frame.starting_stack_pointer;
+                    // drop all the local values for the last function
+                    self.stack.truncate(fn_starting_pointer + 1);
+                    // push the return result
+                    self.push(result);
                 }
                 Opcode::Negate => {
                     if let Value::Number(v) = self.peek_at(0) {
@@ -281,12 +294,14 @@ impl<'a> VirtualMachine<'a> {
                 }
                 Opcode::GetLocal => {
                     let index = self.read_byte();
-                    let v = self.stack[index as usize].clone();
+                    let fn_start_pointer = self.call_frame().starting_stack_pointer;
+                    let v = self.stack[fn_start_pointer + index as usize].clone();
                     self.push(v);
                 }
                 Opcode::SetLocal => {
                     let index = self.read_byte();
-                    self.stack[index as usize] = self.peek_at(0).clone();
+                    let fn_start_pointer = self.call_frame().starting_stack_pointer;
+                    self.stack[fn_start_pointer + index as usize] = self.peek_at(0).clone();
                 }
                 Opcode::JumpIfFalse => {
                     let offset = self.read_short();
@@ -308,8 +323,48 @@ impl<'a> VirtualMachine<'a> {
                     let offset = self.read_short();
                     self.decrement_ip_by(offset);
                 }
+                Opcode::Call => {
+                    let arg_count = self.read_byte();
+                    self.call_value(arg_count)?;
+                }
             };
         }
+    }
+
+    fn call_value(&mut self, arg_count: u8) -> Result<()> {
+        match self.peek_at(arg_count as usize) {
+            Value::Object(Object::Function(f)) => {
+                let function = f.clone();
+                let starting_pointer = self.stack.len() - arg_count as usize - 1;
+                let frame = CallFrame::new(function.clone(), starting_pointer);
+                self.call_frames.push(frame);
+                self.call(function, arg_count as usize)?;
+                Ok(())
+            }
+            _ => bail!(self.runtime_error("Not a function")),
+        }
+    }
+
+    fn call(&mut self, function: Shared<Function>, arg_count: usize) -> Result<bool> {
+        let function = &*function.borrow();
+        match function {
+            Function::UserDefined(u) => {
+                if log_enabled!(Level::Trace) {
+                    let mut buf = vec![];
+                    u.chunk
+                        .disassemble_chunk_with_writer(&function.to_string(), &mut buf);
+                    trace!("\n{}", utf8_to_string(&buf));
+                }
+                if u.arity != arg_count {
+                    self.call_frames.pop();
+                    bail!(self.runtime_error(&format!(
+                        "Expected {} arguments but got {}",
+                        u.arity, arg_count
+                    )))
+                }
+            }
+        }
+        Ok(true)
     }
 
     fn read_string(&mut self) -> Result<Shared<String>> {
@@ -337,25 +392,29 @@ impl<'a> VirtualMachine<'a> {
         }
     }
 
-    // fn read_object<'b>(&mut self) -> Result<Ref<Object>> {
-    //     let mut chunk = self.current_chunk_mut();
-    //     let constant = chunk.read_constant();
-
-    //     let object = Ref::map(constant, |c| match c {
-    //         Value::Object(o) => o,
-    //         _ => nil,
-    //     });
-    //     if *object != *nil {
-    //         Ok(object)
-    //     } else {
-    //         drop(object);
-    //         let line = self.current_chunk().current_line();
-    //         bail!(runtime_vm_error(line, "Unable to read object"))
-    //     }
-    // }
-
     fn runtime_error(&self, message: &str) -> ErrorKind {
-        runtime_vm_error(self.current_chunk().current_line(), message)
+        let mut error_buf = vec![];
+        writeln!(error_buf, "{}", message).expect("Write failed");
+        for frame in (&self.call_frames).iter().rev() {
+            let function = (&*frame.function).borrow();
+            let fun_name = &function.to_string();
+            match &*function {
+                Function::UserDefined(u) => {
+                    let ip = u.chunk.code.read_index;
+                    let line_num = u.chunk.lines[ip - 1];
+                    // if log_enabled!(Level::Trace) {
+                    //     u.chunk
+                    //         .disassemble_chunk_with_writer(fun_name, &mut error_buf);
+                    // }
+                    writeln!(error_buf, "[line {}] in {}", line_num, fun_name)
+                        .expect("Write failed")
+                }
+            };
+        }
+        runtime_vm_error(
+            self.current_chunk().current_line(),
+            &utf8_to_string(&error_buf),
+        )
     }
 
     fn peek_at(&self, distance: usize) -> &Value {
@@ -406,11 +465,6 @@ impl<'a> VirtualMachine<'a> {
         Ok(())
     }
 
-    // fn read_constant(&mut self) -> Ref<Value> {
-    //     let mut chunk = self.current_chunk_mut();
-    //     let value = chunk.read_constant();
-    // }
-
     fn push(&mut self, value: Value) {
         self.stack.push(value);
     }
@@ -418,16 +472,6 @@ impl<'a> VirtualMachine<'a> {
     fn pop(&mut self) -> Value {
         self.stack.pop().expect("Cannot be empty")
     }
-
-    // fn print_stack_trace(&self) {
-    //     print!("          ");
-    //     for v in &self.stack {
-    //         print!("[");
-    //         print_value(*v);
-    //         print!("]");
-    //     }
-    //     println!()
-    // }
 
     pub fn free(&mut self) {
         self.current_chunk_mut().free_all();
@@ -481,7 +525,10 @@ fn print_stack_value(value: &Value, writer: &mut dyn Write) {
 
 #[cfg(test)]
 mod tests {
-    use crate::{errors::*, lox::utf8_to_string};
+    use crate::{
+        errors::*,
+        lox::{print_error, utf8_to_string},
+    };
 
     use super::VirtualMachine;
 
@@ -560,7 +607,7 @@ mod tests {
         match vm.interpret(source.to_string()) {
             Ok(_) => panic!("Expected to fail"),
             Err(e) => assert_eq!(
-                "Runtime Error: Line: 10, message: Undefined variable 'b'",
+                "Runtime Error: Line: 10, message: Undefined variable 'b'\n[line 10] in <fn script>\n",
                 e.to_string()
             ),
         }
@@ -635,6 +682,72 @@ mod tests {
         "#;
         vm.interpret(source.to_string())?;
         assert_eq!("1\n2\n3\n4\n5\n", utf8_to_string(&buf));
+        Ok(())
+    }
+
+    #[test]
+    fn vm_call_error_stack_trace() -> Result<()> {
+        let mut buf = vec![];
+        let mut vm = VirtualMachine::new_with_writer(Some(&mut buf));
+        let source = r#"
+        fun a() { b(); }
+        fun b() { c(); }
+        fun c() {
+            c("too", "many");
+        }
+
+        a();
+        "#;
+        match vm.interpret(source.to_string()) {
+            Ok(_) => panic!("Expect this to fail"),
+            Err(e) => {
+                print_error(e, &mut buf);
+            }
+        }
+        assert_eq!(
+            r#"[Runtime Error] Line: 5, message: Expected 0 arguments but got 2
+[line 5] in <fn c>
+[line 3] in <fn b>
+[line 2] in <fn a>
+[line 8] in <fn script>
+
+"#,
+            utf8_to_string(&buf)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn vm_call_success() -> Result<()> {
+        let mut buf = vec![];
+        let mut vm = VirtualMachine::new_with_writer(Some(&mut buf));
+        let source = r#"
+        var hello = "hello";
+        var world = " world";
+        fun a() { return b(); }
+        fun b() { return c(hello, world); }
+        fun c(arg1, arg2) {
+            print arg1 + arg2;
+        }
+        a();
+        "#;
+        vm.interpret(source.to_string())?;
+        assert_eq!("hello world\n", utf8_to_string(&buf));
+
+        let mut buf = vec![];
+        let mut vm = VirtualMachine::new_with_writer(Some(&mut buf));
+        let source = r#"
+        var hello = "hello";
+        var world = " world";
+        fun a() { return b(); }
+        fun b() { return c(hello, world); }
+        fun c(arg1, arg2) {
+            return  arg1 + arg2;
+        }
+        print a();
+        "#;
+        vm.interpret(source.to_string())?;
+        assert_eq!("hello world\n", utf8_to_string(&buf));
         Ok(())
     }
 }

@@ -16,23 +16,7 @@ impl Display for Value {
             Value::Bool(b) => f.write_str(&b.to_string()),
             Value::Nil => f.write_str("nil"),
             Value::Number(n) => f.write_str(&n.to_string()),
-            Value::Object(o) => match &o {
-                Object::String(s) => {
-                    let s = (&*s).borrow();
-                    f.write_str(&s)
-                }
-                Object::Function(fun) => match &*(&*fun).borrow() {
-                    Function::UserDefined(u) => {
-                        let name = &*u.name.borrow();
-                        let mut name = name.as_str();
-                        if name.is_empty() {
-                            name = "<script>";
-                        }
-                        f.write_str(&format!("<fn {}>", name))
-                    }
-                },
-                Object::Nil => f.write_str("Nil"),
-            },
+            Value::Object(o) => f.write_str(&o.to_string()),
         }
     }
 }
@@ -42,6 +26,19 @@ pub enum Object {
     String(Shared<String>),
     Function(Shared<Function>),
     Nil,
+}
+
+impl Display for Object {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self {
+            Object::String(s) => {
+                let s = (&*s).borrow();
+                f.write_str(&s)
+            }
+            Object::Function(fun) => f.write_str(&((**fun).borrow()).to_string()),
+            Object::Nil => f.write_str("Nil"),
+        }
+    }
 }
 
 impl PartialEq for Object {
@@ -78,6 +75,21 @@ pub fn shared<T>(v: T) -> Shared<T> {
 #[derive(Debug, Clone)]
 pub enum Function {
     UserDefined(UserDefinedFunction),
+}
+
+impl Display for Function {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self {
+            Function::UserDefined(u) => {
+                let name = &*u.name.borrow();
+                let mut name = name.as_str();
+                if name.is_empty() {
+                    name = "script";
+                }
+                f.write_str(&format!("<fn {}>", name))
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone)]

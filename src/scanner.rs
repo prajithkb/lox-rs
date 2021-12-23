@@ -9,7 +9,7 @@ use crate::{
 };
 
 fn scan_error(line: usize, message: &str) -> ErrorKind {
-    ErrorKind::ScanError(format!("[line: {}] Error : message: {}", line, message))
+    ErrorKind::ScanError(format!("[line: {}] Error: message: {}", line, message))
 }
 
 pub struct Scanner {

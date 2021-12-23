@@ -1,3 +1,5 @@
+use std::collections::LinkedList;
+
 use log::log_enabled;
 use num_enum::{FromPrimitive, IntoPrimitive};
 
@@ -104,21 +106,36 @@ impl<'a> Local<'a> {
         Local { name, depth }
     }
 }
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 pub enum FunctionType {
     Script,
-    _UserDefined,
+    UserDefined,
+}
+
+#[derive(Debug)]
+struct State<'a> {
+    function: Function,
+    scope: Scope<'a>,
+    function_type: FunctionType,
+}
+
+impl<'a> State<'a> {
+    fn new(function: Function, scope: Scope<'a>, function_type: FunctionType) -> Self {
+        State {
+            function,
+            scope,
+            function_type,
+        }
+    }
 }
 
 #[derive(Debug)]
 pub struct Compiler<'a> {
     tokens: &'a [Token],
-    compiling_chunk: Chunk,
-    current_index: usize,
+    token_index: usize,
     parse_rules: Vec<ParseRule<'a>>,
-    current_scope: Scope<'a>,
-    function: Function,
-    function_type: FunctionType,
+    states: LinkedList<State<'a>>,
+    state: State<'a>,
 }
 #[allow(dead_code)]
 impl<'a> Compiler<'a> {
@@ -129,20 +146,21 @@ impl<'a> Compiler<'a> {
     pub fn new_with_type(tokens: &'a [Token], function_type: FunctionType) -> Self {
         let mut c = Compiler {
             tokens,
-            compiling_chunk: Chunk::default(),
-            current_index: 0,
+            token_index: 0,
             parse_rules: Vec::new(),
-            current_scope: Scope::new(),
-            function: Function::UserDefined(UserDefinedFunction::new(
-                None,
-                0,
-                Chunk::new(),
-                shared("".to_string()),
-            )),
-            function_type,
+            state: State::new(
+                Function::UserDefined(UserDefinedFunction::new(
+                    None,
+                    0,
+                    Chunk::new(),
+                    shared("".to_string()),
+                )),
+                Scope::new(),
+                function_type,
+            ),
+            states: LinkedList::new(),
         };
-        //TBD;
-        c.current_scope.locals.push(Local::new("", Some(0)));
+        c.current_scope_mut().locals.push(Local::new("", Some(0)));
         c.init_parse_rules();
         c
     }
@@ -152,8 +170,8 @@ impl<'a> Compiler<'a> {
             ParseRule::new(
                 TokenType::LeftParen,
                 Some(Compiler::grouping),
-                None,
-                Precedence::None,
+                Some(Compiler::call),
+                Precedence::Call,
             ),
             ParseRule::new(TokenType::RightParen, None, None, Precedence::None),
             ParseRule::new(TokenType::LeftBrace, None, None, Precedence::None),
@@ -295,17 +313,93 @@ impl<'a> Compiler<'a> {
         while !self.is_at_end() {
             self.declaration()?;
         }
-        self.end_compiler();
-        Ok(self.function)
+        self.end_function();
+        Ok(self.state.function)
     }
 
     fn declaration(&mut self) -> Result<()> {
-        if self.match_and_advance(&[TokenType::Var]) {
+        if self.match_and_advance(&[TokenType::Fun]) {
+            self.fun_declaration()?;
+        } else if self.match_and_advance(&[TokenType::Var]) {
             self.var_declaration()?;
         } else {
             self.statement()?;
         }
         Ok(())
+    }
+
+    fn start_new_function(&mut self, new_function_name: String) {
+        let new_function = Function::UserDefined(UserDefinedFunction::new(
+            None,
+            0,
+            Chunk::new(),
+            shared(new_function_name),
+        ));
+        let mut new_scope = Scope::new();
+        new_scope.locals.push(Local::new("", Some(0)));
+        let current_state = std::mem::replace(
+            &mut self.state,
+            State::new(new_function, new_scope, FunctionType::UserDefined),
+        );
+        self.states.push_back(current_state);
+    }
+
+    fn end_new_function(&mut self) -> State<'a> {
+        let prev_state = self.states.pop_back().expect("State expected");
+        std::mem::replace(&mut self.state, prev_state)
+    }
+
+    fn fun_declaration(&mut self) -> Result<()> {
+        let global = self.parse_variable("Expect function name")?;
+        self.mark_initialized();
+        self.start_new_function(self.function_name(FunctionType::UserDefined)?);
+        self.function()?;
+        self.define_variable(global);
+        Ok(())
+    }
+
+    fn function(&mut self) -> Result<()> {
+        self.begin_scope();
+        self.consume_next_token(TokenType::LeftParen, "Expect '(' after function name")?;
+        while self.current().token_type != TokenType::RightParen {
+            match &mut self.state.function {
+                Function::UserDefined(u) => u.arity += 1,
+            }
+            let constant = self.parse_variable("Expect parameter name")?;
+            self.define_variable(constant);
+            if self.current().token_type == TokenType::Comma {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        self.consume_next_token(TokenType::RightParen, "Expect ')' after parameters")?;
+        self.consume_next_token(TokenType::LeftBrace, "Expect '{' before function body")?;
+        self.block()?;
+        self.end_function();
+        let state = self.end_new_function();
+        let byte = self.add_constant(Value::Object(Object::Function(Object::shared_function(
+            state.function,
+        ))));
+        self.emit_opcode_and_bytes(Opcode::Constant, byte);
+        Ok(())
+    }
+
+    fn function_name(&self, t: FunctionType) -> Result<String> {
+        match t {
+            FunctionType::Script => Ok("".to_string()),
+            FunctionType::UserDefined => {
+                let token = self.previous();
+                let name = token
+                    .literal
+                    .as_ref()
+                    .expect("Expect function name literal");
+                match name {
+                    Literal::Identifier(s) => Ok(s.clone()),
+                    _ => bail!(parse_error(self.previous(), "Expect function name")),
+                }
+            }
+        }
     }
 
     fn var_declaration(&mut self) -> Result<()> {
@@ -348,11 +442,11 @@ impl<'a> Compiler<'a> {
     }
 
     fn resolve_local(&self, name: &Token) -> Result<Option<u8>> {
-        let mut i = self.current_scope.locals.len() as i32 - 1;
+        let mut i = self.current_scope().locals.len() as i32 - 1;
         while i >= 0 {
             let index = i as usize;
-            if self.current_scope.locals[index].name == name.lexeme {
-                if self.current_scope.locals[index].depth.is_none() {
+            if self.current_scope().locals[index].name == name.lexeme {
+                if self.current_scope().locals[index].depth.is_none() {
                     bail!(parse_error(
                         name,
                         "Can't read local variable in its own initializer"
@@ -366,7 +460,7 @@ impl<'a> Compiler<'a> {
     }
 
     fn define_variable(&mut self, byte: u8) {
-        if self.current_scope.depth == GLOBAL_SCOPE_DEPTH {
+        if self.current_scope_mut().depth == GLOBAL_SCOPE_DEPTH {
             self.emit_opcode_and_bytes(Opcode::DefineGlobal, byte);
         } else {
             self.mark_initialized();
@@ -384,8 +478,27 @@ impl<'a> Compiler<'a> {
             self.begin_scope();
             self.block()?;
             self.end_scope();
+        } else if self.match_and_advance(&[TokenType::Return]) {
+            self.return_statement()?;
         } else {
             self.expression_statement()?;
+        }
+        Ok(())
+    }
+
+    fn return_statement(&mut self) -> Result<()> {
+        if self.state.function_type == FunctionType::Script {
+            bail!(parse_error(
+                self.current(),
+                "Can't return from top level code"
+            ))
+        }
+        if self.match_and_advance(&[TokenType::Semicolon]) {
+            self.emit_return();
+        } else {
+            self.expression()?;
+            self.consume_next_token(TokenType::Semicolon, "Expect ';' after return")?;
+            self.emit_op_code(Opcode::Return);
         }
         Ok(())
     }
@@ -421,8 +534,16 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
+    fn current_scope_mut(&mut self) -> &mut Scope<'a> {
+        &mut self.state.scope
+    }
+
+    fn current_scope(&self) -> &Scope<'a> {
+        &self.state.scope
+    }
+
     fn begin_scope(&mut self) {
-        self.current_scope.depth += 1;
+        self.current_scope_mut().depth += 1;
     }
 
     fn block(&mut self) -> Result<()> {
@@ -436,15 +557,15 @@ impl<'a> Compiler<'a> {
     }
 
     fn end_scope(&mut self) {
-        self.current_scope.depth -= 1;
-        let mut i: i32 = self.current_scope.locals.len() as i32 - 1;
+        self.current_scope_mut().depth -= 1;
+        let mut i: i32 = self.current_scope_mut().locals.len() as i32 - 1;
         while i >= 0 {
-            if self.current_scope.locals[i as usize]
+            if self.current_scope_mut().locals[i as usize]
                 .depth
                 .expect("Expect depth")
-                > self.current_scope.depth
+                > self.current_scope_mut().depth
             {
-                self.current_scope.locals.pop();
+                self.current_scope_mut().locals.pop();
                 self.emit_op_code(Opcode::Pop);
             } else {
                 break;
@@ -480,12 +601,12 @@ impl<'a> Compiler<'a> {
             Some(prefix_rule) => prefix_rule(self, can_assign)?,
             None => bail!(parse_error(self.previous(), "Expect expression")),
         };
-
         while precedence <= self.get_rule(self.current().token_type).precedence {
             self.advance();
-            match self.get_rule(self.previous().token_type).infix_function {
+            let prev_token = self.previous();
+            match self.get_rule(prev_token.token_type).infix_function {
                 Some(infix_rule) => infix_rule(self, can_assign)?,
-                None => bail!(parse_error(self.previous(), "Expect expression")),
+                None => bail!(parse_error(prev_token, "Expect expression")),
             };
         }
         if can_assign && self.match_and_advance(&[TokenType::Equal]) {
@@ -581,6 +702,23 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
+    fn call(&mut self, _can_assign: bool) -> Result<()> {
+        let arg_count = self.argument_list()?;
+        self.emit_opcode_and_bytes(Opcode::Call, arg_count);
+        Ok(())
+    }
+
+    fn argument_list(&mut self) -> Result<u8> {
+        let mut count = 0;
+        while self.current().token_type != TokenType::RightParen {
+            self.expression()?;
+            count += 1;
+            self.match_and_advance(&[TokenType::Comma]);
+        }
+        self.consume_next_token(TokenType::RightParen, "Expect ')' after arguments")?;
+        Ok(count)
+    }
+
     #[inline]
     fn get_rule(&mut self, token_type: TokenType) -> &ParseRule<'a> {
         let index: usize = token_type.into();
@@ -624,43 +762,37 @@ impl<'a> Compiler<'a> {
         self.current_chunk().add_constant(value)
     }
 
-    fn end_compiler(&mut self) {
+    fn end_function(&mut self) {
         self.emit_return();
         if log_enabled!(log::Level::Trace) {
-            let mut function_name = match &self.function {
-                Function::UserDefined(u) => {
-                    let s = &*u.name;
-                    let name = s.borrow();
-                    name.to_string()
-                }
-            };
-            if function_name.is_empty() {
-                function_name = "<script>".to_string();
-            }
-            self.current_chunk().disassemble_chunk(&function_name);
+            let name = &self.state.function.to_string();
+            self.current_chunk().disassemble_chunk(name);
             println!("==========")
         }
     }
+
     #[inline]
     fn emit_return(&mut self) {
-        self.emit_op_code(Opcode::Return)
+        self.emit_op_code(Opcode::Nil);
+        self.emit_op_code(Opcode::Return);
     }
 
     fn parse_variable(&mut self, message: &str) -> Result<u8> {
         self.consume_next_token(TokenType::Identifier, message)?;
         self.declare_local_variable()?;
-        if self.current_scope.depth > GLOBAL_SCOPE_DEPTH {
+        if self.current_scope_mut().depth > GLOBAL_SCOPE_DEPTH {
             return Ok(0);
         }
         self.identifier_constant(self.previous().clone())
     }
 
     fn declare_local_variable(&mut self) -> Result<()> {
-        if self.current_scope.depth > GLOBAL_SCOPE_DEPTH {
+        let current_scope_depth = self.current_scope().depth;
+        if self.current_scope_mut().depth > GLOBAL_SCOPE_DEPTH {
             let token = self.previous();
-            for local in self.current_scope.locals.iter().rev() {
+            for local in self.current_scope_mut().locals.iter().rev() {
                 if let Some(depth) = &local.depth {
-                    if *depth < self.current_scope.depth {
+                    if *depth < current_scope_depth {
                         break;
                     }
                     if local.name == token.lexeme {
@@ -678,12 +810,16 @@ impl<'a> Compiler<'a> {
 
     fn add_local(&mut self, token: &'a Token) {
         let local = Local::new(&token.lexeme, None);
-        self.current_scope.locals.push(local);
+        self.current_scope_mut().locals.push(local);
     }
 
     fn mark_initialized(&mut self) {
-        let locals_count = self.current_scope.locals.len();
-        self.current_scope.locals[locals_count - 1].depth = Some(self.current_scope.depth);
+        if self.current_scope_mut().depth == 0 {
+            return;
+        }
+        let locals_count = self.current_scope_mut().locals.len();
+        self.current_scope_mut().locals[locals_count - 1].depth =
+            Some(self.current_scope_mut().depth);
     }
 
     fn identifier_constant(&mut self, mut token: Token) -> Result<u8> {
@@ -704,7 +840,7 @@ impl<'a> Compiler<'a> {
     #[inline]
     fn emit_byte(&mut self, byte: u8) {
         let mut line = 0;
-        if self.current_index != 0 {
+        if self.token_index != 0 {
             line = self.previous().line;
         }
         self.current_chunk().write_chunk(byte, line);
@@ -718,7 +854,7 @@ impl<'a> Compiler<'a> {
 
     #[inline]
     fn current_chunk(&mut self) -> &mut Chunk {
-        match &mut self.function {
+        match &mut self.state.function {
             Function::UserDefined(u) => &mut u.chunk,
         }
     }
@@ -774,18 +910,18 @@ impl<'a> Compiler<'a> {
 
     #[inline]
     fn current(&self) -> &'a Token {
-        &self.tokens[self.current_index]
+        &self.tokens[self.token_index]
     }
 
     #[inline]
     fn previous(&self) -> &'a Token {
-        &self.tokens[self.current_index - 1]
+        &self.tokens[self.token_index - 1]
     }
 
     #[inline]
     fn advance(&mut self) {
         if !self.is_at_end() {
-            self.current_index += 1;
+            self.token_index += 1;
         }
     }
 
@@ -823,7 +959,8 @@ mod tests {
             r#"== test ==
 0000 0001 OpCode[Constant]                  0 '3.14'
 0002    | OpCode[Pop]
-0003    | OpCode[Return]
+0003    | OpCode[Nil]
+0004    | OpCode[Return]
 "#,
             utf8_to_string(&buf)
         );
@@ -845,7 +982,8 @@ mod tests {
             r#"== test ==
 0000 0001 OpCode[Constant]                  0 '3.14'
 0002    | OpCode[Pop]
-0003    | OpCode[Return]
+0003    | OpCode[Nil]
+0004    | OpCode[Return]
 "#,
             utf8_to_string(&buf)
         );
@@ -868,7 +1006,8 @@ mod tests {
 0000 0001 OpCode[Constant]                  0 '3.14'
 0002    | OpCode[Negate]
 0003    | OpCode[Pop]
-0004    | OpCode[Return]
+0004    | OpCode[Nil]
+0005    | OpCode[Return]
 "#,
             utf8_to_string(&buf)
         );
@@ -898,7 +1037,8 @@ mod tests {
 0012    | OpCode[Divide]
 0013    | OpCode[Add]
 0014    | OpCode[Pop]
-0015    | OpCode[Return]
+0015    | OpCode[Nil]
+0016    | OpCode[Return]
 "#,
             utf8_to_string(&buf)
         );
@@ -926,7 +1066,8 @@ mod tests {
 0013    | OpCode[EqualEqual]
 0014    | OpCode[Not]
 0015    | OpCode[Pop]
-0016    | OpCode[Return]
+0016    | OpCode[Nil]
+0017    | OpCode[Return]
 "#,
             utf8_to_string(&buf)
         );
@@ -950,7 +1091,8 @@ mod tests {
 0002    | OpCode[Constant]                  1 ' world'
 0004    | OpCode[Add]
 0005    | OpCode[Pop]
-0006    | OpCode[Return]
+0006    | OpCode[Nil]
+0007    | OpCode[Return]
 "#,
             utf8_to_string(&buf)
         );
@@ -974,7 +1116,8 @@ mod tests {
 0002    | OpCode[Constant]                  1 '3'
 0004    | OpCode[Add]
 0005    | OpCode[Print]
-0006    | OpCode[Return]
+0006    | OpCode[Nil]
+0007    | OpCode[Return]
 "#,
             utf8_to_string(&buf)
         );
@@ -996,7 +1139,8 @@ mod tests {
             r#"== test ==
 0000 0001 OpCode[Constant]                  1 '2'
 0002    | OpCode[DefineGlobal]              0 'a'
-0004    | OpCode[Return]
+0004    | OpCode[Nil]
+0005    | OpCode[Return]
 "#,
             utf8_to_string(&buf)
         );
@@ -1043,7 +1187,8 @@ mod tests {
 0018    | OpCode[Print]
 0019 0010 OpCode[GetGlobal]                 5 'b'
 0021    | OpCode[Print]
-0022    | OpCode[Return]
+0022    | OpCode[Nil]
+0023    | OpCode[Return]
 "#,
             utf8_to_string(&buf)
         );
@@ -1089,7 +1234,8 @@ mod tests {
 0026    | OpCode[Pop]
 0027 0009 OpCode[GetGlobal]                 8 'a'
 0029    | OpCode[Print]
-0030    | OpCode[Return]
+0030    | OpCode[Nil]
+0031    | OpCode[Return]
 "#,
             utf8_to_string(&buf)
         );
@@ -1116,7 +1262,8 @@ mod tests {
 0005    | OpCode[Pop]
 0006    | OpCode[Constant]                  1 '3'
 0008    | OpCode[Print]
-0009    | OpCode[Return]
+0009    | OpCode[Nil]
+0010    | OpCode[Return]
 "#,
             utf8_to_string(&buf)
         );
@@ -1139,7 +1286,8 @@ mod tests {
 0005    | OpCode[Pop]
 0006    | OpCode[Constant]                  1 '3'
 0008    | OpCode[Print]
-0009    | OpCode[Return]
+0009    | OpCode[Nil]
+0010    | OpCode[Return]
 "#,
             utf8_to_string(&buf)
         );
@@ -1181,7 +1329,80 @@ mod tests {
 0023    | OpCode[Pop]
 0024 0006 OpCode[Loop]                     24 -> 4
 0027    | OpCode[Pop]
-0028    | OpCode[Return]
+0028    | OpCode[Nil]
+0029    | OpCode[Return]
+"#,
+            utf8_to_string(&buf)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn functions() -> Result<()> {
+        let source = r#"
+        var const = "You answered";
+        fun areWeHavingItYet(answer) {
+            print  const + " " + answer;
+        }
+          
+        areWeHavingItYet("yes!");
+        "#;
+        let mut scanner = Scanner::new(source.to_string());
+        let tokens = scanner.scan_tokens()?;
+        let compiler = Compiler::new(tokens);
+        let function = compiler.compile()?;
+        let mut buf = vec![];
+        match &function {
+            UserDefined(u) => {
+                u.chunk.disassemble_chunk_with_writer("test", &mut buf);
+            }
+        }
+        assert_eq!(
+            r#"== test ==
+0000 0002 OpCode[Constant]                  1 'You answered'
+0002    | OpCode[DefineGlobal]              0 'const'
+0004 0005 OpCode[Constant]                  3 '<fn areWeHavingItYet>'
+0006    | OpCode[DefineGlobal]              2 'areWeHavingItYet'
+0008 0007 OpCode[GetGlobal]                 4 'areWeHavingItYet'
+0010    | OpCode[Constant]                  5 'yes!'
+0012    | OpCode[Call]                      1
+0014    | OpCode[Pop]
+0015    | OpCode[Nil]
+0016    | OpCode[Return]
+"#,
+            utf8_to_string(&buf)
+        );
+
+        let source = r#"
+        var const = "You answered";
+        fun areWeHavingItYet(answer) {
+            return  const + " " + answer;
+        }
+          
+        print areWeHavingItYet("yes!");
+        "#;
+        let mut scanner = Scanner::new(source.to_string());
+        let tokens = scanner.scan_tokens()?;
+        let compiler = Compiler::new(tokens);
+        let function = compiler.compile()?;
+        let mut buf = vec![];
+        match &function {
+            UserDefined(u) => {
+                u.chunk.disassemble_chunk_with_writer("test", &mut buf);
+            }
+        }
+        assert_eq!(
+            r#"== test ==
+0000 0002 OpCode[Constant]                  1 'You answered'
+0002    | OpCode[DefineGlobal]              0 'const'
+0004 0005 OpCode[Constant]                  3 '<fn areWeHavingItYet>'
+0006    | OpCode[DefineGlobal]              2 'areWeHavingItYet'
+0008 0007 OpCode[GetGlobal]                 4 'areWeHavingItYet'
+0010    | OpCode[Constant]                  5 'yes!'
+0012    | OpCode[Call]                      1
+0014    | OpCode[Print]
+0015    | OpCode[Nil]
+0016    | OpCode[Return]
 "#,
             utf8_to_string(&buf)
         );

@@ -35,6 +35,7 @@ pub enum Opcode {
     JumpIfTrue,
     Jump,
     Loop,
+    Call,
 }
 
 impl Display for Opcode {
@@ -111,7 +112,7 @@ pub fn disassemble_instruction(
             Opcode::Constant | Opcode::DefineGlobal | Opcode::GetGlobal | Opcode::SetGlobal => {
                 constant_instruction(&instruction, chunk, offset, writer)
             }
-            Opcode::SetLocal | Opcode::GetLocal => {
+            Opcode::SetLocal | Opcode::GetLocal | Opcode::Call => {
                 byte_instruction(&instruction, chunk, offset, writer)
             }
             Opcode::Jump | Opcode::JumpIfFalse | Opcode::JumpIfTrue => {

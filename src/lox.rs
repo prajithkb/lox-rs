@@ -1,8 +1,7 @@
 use std::{
     cell::RefCell,
     fs::File,
-    io::{self, stdout, Read, Write},
-    process::exit,
+    io::{self, stderr, Read, Write},
     rc::Rc,
     time::Instant,
 };
@@ -19,7 +18,6 @@ pub type Shared<T> = Rc<RefCell<T>>;
 pub type Writer<'a> = Option<&'a mut dyn Write>;
 
 pub struct Lox<'a> {
-    error: Option<LoxError>,
     interpreter: Interpreter<'a>,
     vm: VirtualMachine<'a>,
 }
@@ -29,17 +27,10 @@ pub enum LoxRunType {
     VirtualMachine,
 }
 
-#[derive(Debug)]
-enum LoxError {
-    RuntimeError,
-    SyntaxError,
-}
-
 impl<'a> Lox<'a> {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Lox {
-            error: None,
             interpreter: Interpreter::new(),
             vm: VirtualMachine::new(),
         }
@@ -62,14 +53,8 @@ impl<'a> Lox<'a> {
         Ok(())
     }
 
-    pub fn run_script_with_exit_code(&mut self, script: &str, run_type: LoxRunType) {
-        match self.run_script(script, run_type) {
-            Ok(_) => exit(0),
-            Err(e) => {
-                eprint!("Error: {}", e);
-                exit(-1);
-            }
-        }
+    pub fn run_script_with_exit_code(&mut self, script: &str, run_type: LoxRunType) -> Result<()> {
+        self.run_script(script, run_type)
     }
 
     pub fn run_vm(&mut self, source: String) -> Result<()> {
@@ -80,57 +65,32 @@ impl<'a> Lox<'a> {
     pub fn run_interpreter(&mut self, content: String) -> Result<()> {
         let mut scanner = Scanner::new(content);
         let start_time = Instant::now();
-        match scanner.scan_tokens() {
-            Ok(tokens) => {
-                debug!("Created Tokens : {:?}", tokens);
-                info!("Tokens created in {} us", start_time.elapsed().as_micros());
-                let start_time = Instant::now();
-                let mut parser = Parser::new(tokens);
-                let mut resolver = Resolver::new();
-                let statements = parser.parse()?;
-                debug!("Created Statements: {:?}", statements);
-                info!(
-                    "Statements created in {} us",
-                    start_time.elapsed().as_micros()
-                );
-                let start_time = Instant::now();
-                match resolver.resolve(&statements) {
-                    Ok(resolved_variables) => {
-                        info!(
-                            "Statements resolved in {} us",
-                            start_time.elapsed().as_micros()
-                        );
-                        let start_time = Instant::now();
-                        let r = self.interpreter.interpret(&statements, resolved_variables);
-                        info!(
-                            "Statements interpreted in {} us ({} ms)",
-                            start_time.elapsed().as_micros(),
-                            start_time.elapsed().as_millis()
-                        );
-                        match r {
-                            Ok(_) => {
-                                debug!("Interpreted successfully!");
-                                Ok(())
-                            }
-                            Err(runtime_error) => {
-                                self.error = Some(LoxError::RuntimeError);
-                                report_error(runtime_error.to_string(), &mut stdout());
-                                Err(runtime_error)
-                            }
-                        }
-                    }
-                    Err(resolver_error) => {
-                        self.error = Some(LoxError::SyntaxError);
-                        report_error(resolver_error.to_string(), &mut stdout());
-                        Err(resolver_error)
-                    }
-                }
-            }
-            Err(scan_error) => {
-                self.error = Some(LoxError::SyntaxError);
-                Err(scan_error)
-            }
-        }
+        let tokens = scanner.scan_tokens();
+        info!("Tokens created in {} us", start_time.elapsed().as_micros());
+        debug!("Created Tokens : {:?}", tokens);
+        let start_time = Instant::now();
+        let mut parser = Parser::new(tokens?);
+        let mut resolver = Resolver::new();
+        let statements = parser.parse()?;
+        debug!("Created Statements: {:?}", statements);
+        info!(
+            "Statements created in {} us",
+            start_time.elapsed().as_micros()
+        );
+        let start_time = Instant::now();
+        let resolved_variables = resolver.resolve(&statements);
+        info!(
+            "Statements resolved in {} us",
+            start_time.elapsed().as_micros()
+        );
+        let result = self.interpreter.interpret(&statements, resolved_variables?);
+        info!(
+            "Statements interpreted in {} us ({} ms)",
+            start_time.elapsed().as_micros(),
+            start_time.elapsed().as_millis()
+        );
+        result?;
+        Ok(())
     }
 
     pub fn run_prompt(&mut self, run_type: LoxRunType) -> Result<()> {
@@ -148,10 +108,10 @@ impl<'a> Lox<'a> {
             match result {
                 Ok(_) => continue,
                 Err(e) => {
-                    println!("Command encountered error [{}], to exit press Ctrl + C", e)
+                    eprintln!("Command encountered error, to exit press Ctrl + C");
+                    print_error(e, &mut stderr());
                 }
             };
-            self.error = None;
             if bytes == 0 {
                 break;
             }
@@ -185,4 +145,20 @@ pub fn utf8_to_string(bytes: &[u8]) -> String {
         Ok(s) => s,
         Err(_) => String::new(),
     }
+}
+
+pub fn print_error(e: Error, error_writer: &mut dyn Write) {
+    match e.0 {
+        ErrorKind::ScanError(i) => print_error_kind_message("[Scan Error]", &i, error_writer),
+        ErrorKind::ParseError(i) => print_error_kind_message("[Parse Error]", &i, error_writer),
+        ErrorKind::ResolutionError(i) => {
+            print_error_kind_message("[Resolution Error]", &i, error_writer)
+        }
+        ErrorKind::RuntimeError(i) => print_error_kind_message("[Runtime Error]", &i, error_writer),
+        _ => print_error_kind_message("Unknown", &e.to_string(), error_writer),
+    };
+}
+
+fn print_error_kind_message(kind: &str, message: &str, error_writer: &mut dyn Write) {
+    writeln!(error_writer, "{} {}", kind, message).expect("Write failed");
 }
