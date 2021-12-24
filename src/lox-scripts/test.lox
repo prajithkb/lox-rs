@@ -1,7 +1,12 @@
-fun a() { b(); }
-fun b() { c(); }
+var i = 1;
+var limit = 1000;
+fun a() { return b(); }
+fun b() { return c(); }
 fun c() {
-  c("too", "many");
+  while ( i< limit) {
+      i = i + 1;
+  }
+  return i;
 }
 
-a();
+print a();

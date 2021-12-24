@@ -1,7 +1,7 @@
 use std::env;
 use std::io::stderr;
 
-use lox_rs::lox::{Lox, print_error};
+use lox_rs::lox::{print_error, Lox};
 use lox_rs::*;
 fn main() -> Result<()> {
     env_logger::init();

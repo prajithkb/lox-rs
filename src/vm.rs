@@ -1,4 +1,5 @@
 use std::cell::{Ref, RefMut};
+use std::collections::LinkedList;
 use std::convert::TryFrom;
 use std::f64::EPSILON;
 use std::io::{stdout, Write};
@@ -32,6 +33,7 @@ impl CallFrame {
 pub struct VirtualMachine<'a> {
     stack: Vec<Value>,
     call_frames: Vec<CallFrame>,
+    call_ips: LinkedList<usize>,
     runtime_values: Values,
     custom_writer: Writer<'a>,
 }
@@ -56,6 +58,7 @@ impl<'a> VirtualMachine<'a> {
             stack: Vec::new(),
             call_frames: Vec::new(),
             runtime_values: Values::new(),
+            call_ips: LinkedList::new(),
             custom_writer,
         }
     }
@@ -211,14 +214,17 @@ impl<'a> VirtualMachine<'a> {
                     self.push(constant);
                 }
                 Opcode::Return => {
+                    trace!("Call frame count: {}", self.call_frames.len());
                     let result = self.pop();
-                    let frame = self.call_frames.pop().expect("Expect frame");
-                    if self.call_frames.is_empty() {
+                    if self.call_frames.len() == 1 {
                         return Ok(());
                     }
+                    let current_ip = self.call_ips.pop_back().expect("Expect ip");
+                    let frame = self.call_frames.pop().expect("Expect frame");
+                    self.current_chunk_mut().code.read_index = current_ip;
                     let fn_starting_pointer = frame.starting_stack_pointer;
                     // drop all the local values for the last function
-                    self.stack.truncate(fn_starting_pointer + 1);
+                    self.stack.truncate(fn_starting_pointer);
                     // push the return result
                     self.push(result);
                 }
@@ -336,6 +342,7 @@ impl<'a> VirtualMachine<'a> {
             Value::Object(Object::Function(f)) => {
                 let function = f.clone();
                 let starting_pointer = self.stack.len() - arg_count as usize - 1;
+                self.call_ips.push_back(self.ip());
                 let frame = CallFrame::new(function.clone(), starting_pointer);
                 self.call_frames.push(frame);
                 self.call(function, arg_count as usize)?;
@@ -346,15 +353,10 @@ impl<'a> VirtualMachine<'a> {
     }
 
     fn call(&mut self, function: Shared<Function>, arg_count: usize) -> Result<bool> {
-        let function = &*function.borrow();
-        match function {
+        let mut function = &mut *function.borrow_mut();
+        match &mut function {
             Function::UserDefined(u) => {
-                if log_enabled!(Level::Trace) {
-                    let mut buf = vec![];
-                    u.chunk
-                        .disassemble_chunk_with_writer(&function.to_string(), &mut buf);
-                    trace!("\n{}", utf8_to_string(&buf));
-                }
+                u.chunk.code.read_index = 0;
                 if u.arity != arg_count {
                     self.call_frames.pop();
                     bail!(self.runtime_error(&format!(
@@ -474,7 +476,7 @@ impl<'a> VirtualMachine<'a> {
     }
 
     pub fn free(&mut self) {
-        self.current_chunk_mut().free_all();
+        //TODO
     }
 
     fn print_stack_value(&mut self, value: &Value) {
@@ -748,6 +750,19 @@ mod tests {
         "#;
         vm.interpret(source.to_string())?;
         assert_eq!("hello world\n", utf8_to_string(&buf));
+
+        let mut buf = vec![];
+        let mut vm = VirtualMachine::new_with_writer(Some(&mut buf));
+        let source = r#"
+        fun fib(n) {
+            if (n < 2) return n;
+            return fib(n - 1) + fib(n - 2); 
+          }
+          
+          print fib(10);
+        "#;
+        vm.interpret(source.to_string())?;
+        assert_eq!("55\n", utf8_to_string(&buf));
         Ok(())
     }
 }
