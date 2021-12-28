@@ -64,7 +64,7 @@ pub fn constant_instruction(
 ) -> usize {
     let constant = *chunk.code.read_item_at(offset + 1);
     write!(writer, "{:<30} {:4} '", instruction.to_string(), constant).expect("Write failed");
-    print_value(&chunk.constants.read_item_at(constant as usize), writer);
+    print_value(chunk.constants.read_item_at(constant as usize), writer);
     writeln!(writer, "'").expect("Write failed");
     offset + 2
 }
@@ -118,7 +118,7 @@ pub fn closure_instruction(
     let constant = *chunk.code.read_item_at(offset);
     offset += 1;
     write!(writer, "{:<30} {:4} '", instruction.to_string(), constant).expect("Write failed");
-    print_value(&chunk.constants.read_item_at(constant as usize), writer);
+    print_value(chunk.constants.read_item_at(constant as usize), writer);
     writeln!(writer, "'").expect("write failed");
     let v = &*chunk.constants.read_item_at(constant as usize);
     if let Value::Object(Object::Closure(c)) = v {

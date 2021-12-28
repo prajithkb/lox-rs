@@ -1,7 +1,4 @@
-use std::{
-    cell::{Ref, RefCell},
-    io::{stdout, Write},
-};
+use std::io::{stdout, Write};
 
 use crate::{
     instructions::{self},
@@ -38,8 +35,8 @@ impl Chunk {
     }
 
     #[inline]
-    pub fn read_constant(&mut self) -> Ref<Value> {
-        let offset = *self.code.read_and_increment();
+    pub fn read_constant_at(&self, offset: usize) -> &Value {
+        let offset = *self.code.read_item_at(offset);
         self.constants.read_item_at(offset as usize)
     }
 
@@ -95,7 +92,7 @@ impl Chunk {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Memory<T> {
-    inner: Vec<RefCell<T>>,
+    inner: Vec<T>,
     pub count: usize,
     pub read_index: usize,
 }
@@ -112,7 +109,7 @@ impl<T> Memory<T> {
 
     #[inline]
     pub fn write_item(&mut self, item: T) {
-        self.inner.push(RefCell::new(item));
+        self.inner.push(item);
         self.count += 1;
     }
 
@@ -121,18 +118,12 @@ impl<T> Memory<T> {
         self.read_index = index
     }
     #[inline]
-    pub fn read_item_at(&self, index: usize) -> Ref<T> {
-        self.inner.get(index).expect("Index out of bounds").borrow()
-    }
-
-    #[inline]
-    pub fn read_and_increment(&mut self) -> Ref<T> {
-        self.read_index += 1;
-        self.read_item_at(self.read_index - 1)
+    pub fn read_item_at(&self, index: usize) -> &T {
+        &self.inner[index]
     }
 
     pub fn insert_at(&mut self, index: usize, v: T) {
-        self.inner[index] = RefCell::new(v);
+        self.inner[index] = v;
     }
 
     pub fn free_items(&mut self) {

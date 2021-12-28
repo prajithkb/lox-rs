@@ -21,6 +21,7 @@ use crate::tokens::pretty_print;
 struct CallFrame {
     function: Shared<Closure>,
     fn_start_stack_ptr: usize,
+    ip: usize,
 }
 
 impl CallFrame {
@@ -28,6 +29,7 @@ impl CallFrame {
         CallFrame {
             function,
             fn_start_stack_ptr,
+            ip: 0,
         }
     }
 }
@@ -36,7 +38,6 @@ pub struct VirtualMachine<'a> {
     stack: [Value; 1024],
     stack_top: usize,
     call_frames: Vec<CallFrame>,
-    call_ips: LinkedList<usize>,
     runtime_values: Values,
     up_values: LinkedList<Shared<Upvalue>>,
     custom_writer: Writer<'a>,
@@ -83,7 +84,6 @@ impl<'a> VirtualMachine<'a> {
             stack_top: 0,
             call_frames: Vec::new(),
             runtime_values: Values::new(),
-            call_ips: LinkedList::new(),
             up_values: LinkedList::new(),
             custom_writer,
         }
@@ -122,21 +122,17 @@ impl<'a> VirtualMachine<'a> {
     #[inline]
     fn call_frame_peek_at_mut(&mut self, index: usize) -> &mut CallFrame {
         let len = self.call_frames.len();
-        self.call_frames
-            .get_mut(len - 1 - index)
-            .expect("Expected a call frame")
+        &mut self.call_frames[len - 1 - index]
     }
     #[inline]
     fn call_frame_peek_at(&self, index: usize) -> &CallFrame {
         let len = self.call_frames.len();
-        self.call_frames
-            .get(len - 1 - index)
-            .expect("Expected a call frame")
+        &self.call_frames[len - 1 - index]
     }
 
     #[inline]
     fn ip(&self) -> usize {
-        self.current_chunk().code.read_index
+        self.call_frame().ip
     }
 
     #[inline]
@@ -153,23 +149,41 @@ impl<'a> VirtualMachine<'a> {
 
     #[inline]
     fn set_ip(&mut self, index: usize) {
-        self.current_chunk_mut().code.read_index = index;
+        self.call_frame_mut().ip = index;
+    }
+
+    fn read_byte_without_increment(&self) -> u8 {
+        let ip = self.ip();
+        let chunk = &*self.current_chunk();
+        let v = chunk.code.read_item_at(ip);
+        *v
     }
 
     #[inline]
     fn read_byte(&mut self) -> u8 {
-        let mut chunk = self.current_chunk_mut();
-        let v = &mut chunk.code;
-        let v = *v.read_and_increment();
+        let v = self.read_byte_without_increment();
+        self.call_frame_mut().ip += 1;
         v
     }
 
     #[inline]
-    fn current_chunk_mut(&mut self) -> RefMut<Chunk> {
-        let function = self.current_function_mut();
-        RefMut::map(function, |f| match f {
-            Function::UserDefined(u) => &mut u.chunk,
-        })
+    fn read_constant(&mut self) -> Value {
+        let v = self.read_constant_without_increment();
+        self.call_frame_mut().ip += 1;
+        v
+    }
+
+    #[inline]
+    fn read_constant_as_ref_without_increment(&self) -> Ref<Value> {
+        let ip = self.call_frame().ip;
+        let v = Ref::map(self.current_chunk(), |c| c.read_constant_at(ip));
+        v
+    }
+
+    #[inline]
+    fn read_constant_without_increment(&self) -> Value {
+        let v = self.read_constant_as_ref_without_increment();
+        v.clone()
     }
 
     #[inline]
@@ -194,11 +208,6 @@ impl<'a> VirtualMachine<'a> {
     }
 
     #[inline]
-    fn current_function_mut(&mut self) -> RefMut<Function> {
-        let v = self.current_closure_mut();
-        RefMut::map(v, |c| &mut c.function)
-    }
-    #[inline]
     fn current_function(&self) -> Ref<Function> {
         let v = self.current_closure();
         Ref::map(v, |c| &c.function)
@@ -206,8 +215,8 @@ impl<'a> VirtualMachine<'a> {
 
     #[inline]
     fn read_short(&mut self) -> u16 {
-        let first = *self.current_chunk_mut().code.read_and_increment() as u16;
-        let second = *self.current_chunk_mut().code.read_and_increment() as u16;
+        let first = self.read_byte() as u16;
+        let second = self.read_byte() as u16;
         first << 8 | second
     }
 
@@ -235,18 +244,15 @@ impl<'a> VirtualMachine<'a> {
                 );
                 let fun_name = (*self.current_function()).to_string();
                 trace!(
-                    "In function {} Next Instruction: [{}]",
+                    "IP: {}, In function {} Next Instruction: [{}]",
+                    self.ip(),
                     fun_name,
                     utf8_to_string(&buf).trim()
                 );
             }
             match instruction {
                 Opcode::Constant => {
-                    let mut chunk = self.current_chunk_mut();
-                    let value = chunk.read_constant();
-                    let constant = value.clone();
-                    drop(value);
-                    drop(chunk);
+                    let constant = self.read_constant();
                     self.push(constant);
                 }
                 Opcode::Return => {
@@ -257,9 +263,8 @@ impl<'a> VirtualMachine<'a> {
                     if self.call_frames.len() == 1 {
                         return Ok(());
                     }
-                    let current_ip = self.call_ips.pop_back().expect("Expect ip");
-                    self.call_frames.pop();
-                    self.current_chunk_mut().code.read_index = current_ip;
+                    let _frame = self.call_frames.pop().expect("expect frame");
+                    // self.set_ip(frame.ip);
                     // drop all the local values for the last function
                     self.stack_top = fn_starting_pointer;
                     // push the return result
@@ -305,33 +310,29 @@ impl<'a> VirtualMachine<'a> {
                     self.pop();
                 }
                 Opcode::DefineGlobal => {
-                    let name = self.read_string()?;
+                    let name = &*self.read_string()?;
                     let value = self.pop();
-                    self.runtime_values.insert(name, value);
+                    self.runtime_values.insert(name.to_string(), value);
                 }
                 Opcode::GetGlobal => {
-                    let name = self.read_string()?;
-                    let value = self.runtime_values.get(&name);
+                    let name = &self.read_string()?;
+                    let value = self.runtime_values.get(name);
                     if let Some(v) = value {
                         let v = v.clone();
                         self.push(v)
                     } else {
-                        bail!(self
-                            .runtime_error(&format!("Undefined variable '{}'", (*name).borrow())))
+                        bail!(self.runtime_error(&format!("Undefined variable '{}'", &name)))
                     }
                 }
                 Opcode::SetGlobal => {
-                    let name = self.read_string()?;
+                    let name = &self.read_string()?;
                     let value = self.peek_at(0).clone();
-                    match self.runtime_values.get_mut(&name) {
+                    match self.runtime_values.get_mut(name) {
                         Some(e) => {
                             *e = value;
                         }
                         None => {
-                            bail!(self.runtime_error(&format!(
-                                "Undefined variable '{}'",
-                                (*name).borrow()
-                            )))
+                            bail!(self.runtime_error(&format!("Undefined variable '{}'", &name)))
                         }
                     }
                 }
@@ -483,7 +484,6 @@ impl<'a> VirtualMachine<'a> {
             Value::Object(Object::Closure(c)) => {
                 let closure = c.clone();
                 let starting_pointer = self.stack_top - arg_count as usize - 1;
-                self.call_ips.push_back(self.ip());
                 let frame = CallFrame::new(closure.clone(), starting_pointer);
                 self.call_frames.push(frame);
                 self.call(closure, arg_count as usize)?;
@@ -498,7 +498,7 @@ impl<'a> VirtualMachine<'a> {
         let mut function = get_function_mut(closure);
         match &mut *function {
             Function::UserDefined(u) => {
-                u.chunk.code.read_index = 0;
+                self.set_ip(0);
                 let arity = u.arity;
                 if arity != arg_count {
                     drop(function);
@@ -513,53 +513,19 @@ impl<'a> VirtualMachine<'a> {
         Ok(true)
     }
 
-    fn read_string(&mut self) -> Result<Shared<String>> {
-        let mut chunk = self.current_chunk_mut();
-        let constant = chunk.read_constant();
-        let nil = &Object::Nil;
-        let object = Ref::map(constant, |c| match c {
-            Value::Object(o) => o,
-            _ => nil,
-        });
-        if *object != *nil {
-            match &*object {
-                Object::String(s) => Ok(s.clone()),
-                _ => {
-                    drop(object);
-                    drop(chunk);
-                    bail!(self.runtime_error("Not a string"))
-                }
-            }
-        } else {
-            drop(object);
-            drop(chunk);
-            let line = self.current_chunk().current_line();
-            bail!(runtime_vm_error(line, "Unable to read object"))
+    fn read_string(&mut self) -> Result<String> {
+        let constant = self.read_constant();
+        match constant {
+            Value::Object(Object::String(s)) => Ok(s),
+            _ => bail!(self.runtime_error("Not a string")),
         }
     }
 
     fn read_closure(&mut self) -> Result<Shared<Closure>> {
-        let mut chunk = self.current_chunk_mut();
-        let constant = chunk.read_constant();
-        let nil = &Object::Nil;
-        let object = Ref::map(constant, |c| match c {
-            Value::Object(o) => o,
-            _ => nil,
-        });
-        if *object != *nil {
-            match &*object {
-                Object::Closure(s) => Ok(s.clone()),
-                _ => {
-                    drop(object);
-                    drop(chunk);
-                    bail!(self.runtime_error("Not a string"))
-                }
-            }
-        } else {
-            drop(object);
-            drop(chunk);
-            let line = self.current_chunk().current_line();
-            bail!(runtime_vm_error(line, "Unable to read object"))
+        let constant = self.read_constant();
+        match constant {
+            Value::Object(Object::Closure(s)) => Ok(s),
+            _ => bail!(self.runtime_error("Not a Closure")),
         }
     }
 
@@ -572,17 +538,15 @@ impl<'a> VirtualMachine<'a> {
             let fun_name = &function.to_string();
             match &*function {
                 Function::UserDefined(u) => {
-                    let ip = u.chunk.code.read_index;
+                    let ip = frame.ip;
                     let line_num = u.chunk.lines[ip];
                     writeln!(error_buf, "[line {}] in {}", line_num, fun_name)
                         .expect("Write failed")
                 }
             };
         }
-        runtime_vm_error(
-            self.current_chunk().current_line(),
-            &utf8_to_string(&error_buf),
-        )
+        let line = self.current_chunk().lines[self.ip()];
+        runtime_vm_error(line, &utf8_to_string(&error_buf))
     }
 
     fn peek_at(&self, distance: usize) -> &Value {
@@ -608,11 +572,11 @@ impl<'a> VirtualMachine<'a> {
         match (self.peek_at(1), self.peek_at(0)) {
             (Value::Object(Object::String(left)), Value::Object(Object::String(right))) => {
                 let mut concatenated_string = String::new();
-                concatenated_string.push_str((&**left).borrow().as_str());
-                concatenated_string.push_str((&**right).borrow().as_str());
+                concatenated_string.push_str(left);
+                concatenated_string.push_str(right);
                 self.pop();
                 self.pop();
-                self.push(Value::Object(Object::string(concatenated_string)));
+                self.push(Value::Object(Object::String(concatenated_string)));
                 Ok(())
             }
             (Value::Number(_), Value::Number(_)) => self.binary_op(|a, b| Value::Number(a + b)),
@@ -707,9 +671,10 @@ fn get_function(closure: Ref<Closure>) -> Ref<Function> {
 
 #[cfg(test)]
 mod tests {
+    #[allow(unused_imports)]
     use crate::{
         errors::*,
-        lox::{print_error, utf8_to_string},
+        lox::{init_logger_for_test, print_error, utf8_to_string},
     };
 
     use super::VirtualMachine;

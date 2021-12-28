@@ -31,11 +31,8 @@ impl Default for Value {
 
 #[derive(Debug, Clone)]
 pub enum Object {
-    String(Shared<String>),
-    #[allow(unused)]
-    Function(Shared<Function>),
+    String(String),
     Closure(Shared<Closure>),
-    Nil,
 }
 
 #[derive(Debug, Clone)]
@@ -78,12 +75,7 @@ impl Upvalue {
 impl Display for Object {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self {
-            Object::String(s) => {
-                let s = (&*s).borrow();
-                f.write_str(&s)
-            }
-            Object::Function(fun) => f.write_str(&((**fun).borrow()).to_string()),
-            Object::Nil => f.write_str("Nil"),
+            Object::String(s) => f.write_str(s),
             Object::Closure(c) => f.write_str(&(*c.borrow()).to_string()),
         }
     }
@@ -93,16 +85,8 @@ impl PartialEq for Object {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
             (Self::String(l0), Self::String(r0)) => l0 == r0,
-            (Self::Function(_), Self::Function(_)) => false,
             _ => core::mem::discriminant(self) == core::mem::discriminant(other),
         }
-    }
-}
-
-impl Object {
-    #[inline]
-    pub fn string(string: String) -> Object {
-        Object::String(Rc::new(RefCell::new(string)))
     }
 }
 
@@ -119,8 +103,7 @@ impl Display for Function {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self {
             Function::UserDefined(u) => {
-                let name = &*u.name.borrow();
-                let mut name = name.as_str();
+                let mut name = &*u.name;
                 if name.is_empty() {
                     name = "script";
                 }
@@ -132,17 +115,15 @@ impl Display for Function {
 
 #[derive(Debug, Clone)]
 pub struct UserDefinedFunction {
-    pub object: Option<Object>,
     pub arity: usize,
     pub chunk: Chunk,
-    pub name: Shared<String>,
+    pub name: String,
     pub upvalue_count: usize,
 }
 
 impl UserDefinedFunction {
-    pub fn new(object: Option<Object>, arity: usize, chunk: Chunk, name: Shared<String>) -> Self {
+    pub fn new(arity: usize, chunk: Chunk, name: String) -> Self {
         UserDefinedFunction {
-            object,
             arity,
             chunk,
             name,
@@ -150,25 +131,10 @@ impl UserDefinedFunction {
         }
     }
 }
-#[derive(PartialOrd, Debug, Eq)]
-struct Key(Shared<String>);
-
-impl PartialEq for Key {
-    fn eq(&self, other: &Self) -> bool {
-        *(&self.0).borrow() == *(&other.0).borrow()
-    }
-}
-
-impl std::hash::Hash for Key {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        (&self.0).borrow().hash(state);
-    }
-}
-
 #[allow(dead_code)]
 #[derive(Debug)]
 pub struct Values {
-    objects: HashMap<Key, Value>,
+    objects: HashMap<String, Value>,
 }
 
 #[allow(dead_code)]
@@ -179,19 +145,19 @@ impl Values {
         }
     }
 
-    pub fn insert(&mut self, key: Shared<String>, value: Value) {
-        self.objects.insert(Key(key), value);
+    pub fn insert(&mut self, key: String, value: Value) {
+        self.objects.insert(key, value);
     }
 
-    pub fn get(&self, key: &Shared<String>) -> Option<&Value> {
-        self.objects.get(&Key(key.clone()))
+    pub fn get(&self, key: &str) -> Option<&Value> {
+        self.objects.get(key)
     }
 
-    pub fn get_mut(&mut self, key: &Shared<String>) -> Option<&mut Value> {
-        self.objects.get_mut(&Key(key.clone()))
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut Value> {
+        self.objects.get_mut(key)
     }
 
-    pub fn remove(&mut self, key: &Shared<String>) {
-        self.objects.remove(&Key(key.clone()));
+    pub fn remove(&mut self, key: &str) {
+        self.objects.remove(key);
     }
 }

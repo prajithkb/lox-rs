@@ -180,12 +180,7 @@ impl<'a> Compiler<'a> {
             token_index: 0,
             parse_rules: Vec::new(),
             state: State::new(
-                Function::UserDefined(UserDefinedFunction::new(
-                    None,
-                    0,
-                    Chunk::new(),
-                    shared("".to_string()),
-                )),
+                Function::UserDefined(UserDefinedFunction::new(0, Chunk::new(), "".to_string())),
                 Scope::new(),
                 function_type,
             ),
@@ -361,12 +356,8 @@ impl<'a> Compiler<'a> {
     }
 
     fn start_new_function(&mut self, new_function_name: String) {
-        let new_function = Function::UserDefined(UserDefinedFunction::new(
-            None,
-            0,
-            Chunk::new(),
-            shared(new_function_name),
-        ));
+        let new_function =
+            Function::UserDefined(UserDefinedFunction::new(0, Chunk::new(), new_function_name));
         let mut new_scope = Scope::new();
         new_scope.locals.push(Local::new("", Some(0)));
         let current_state = std::mem::replace(
@@ -725,7 +716,7 @@ impl<'a> Compiler<'a> {
 
     fn string(&mut self, _can_assign: bool) -> Result<()> {
         if let Some(Literal::String(s)) = &self.previous().literal {
-            let value = Value::Object(Object::string(s.to_string()));
+            let value = Value::Object(Object::String(s.to_string()));
             self.emit_constant(value);
             Ok(())
         } else {
@@ -929,7 +920,7 @@ impl<'a> Compiler<'a> {
     fn identifier_constant(&mut self, mut token: Token) -> Result<u8> {
         let literal = token.literal.take();
         if let Literal::Identifier(s) = literal.expect("Expect string") {
-            let name = Value::Object(Object::string(s));
+            let name = Value::Object(Object::String(s));
             Ok(self.add_constant(name))
         } else {
             bail!(parse_error(&token, "Expect identifier"))
