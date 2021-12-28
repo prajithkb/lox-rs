@@ -42,6 +42,7 @@ pub enum Opcode {
     Closure,
     GetUpvalue,
     SetUpvalue,
+    CloseUpvalue,
 }
 
 impl Display for Opcode {
@@ -107,25 +108,56 @@ pub fn print_value(value: &Value, writer: &mut dyn Write) {
     write!(writer, "{}", value).expect("Write failed");
 }
 
-pub fn disassemble_instruction(
-    byte: u8,
+pub fn closure_instruction(
+    instruction: &Opcode,
     chunk: &Chunk,
     mut offset: usize,
     writer: &mut dyn Write,
 ) -> usize {
+    offset += 1;
+    let constant = *chunk.code.read_item_at(offset);
+    offset += 1;
+    write!(writer, "{:<30} {:4} '", instruction.to_string(), constant).expect("Write failed");
+    print_value(&chunk.constants.read_item_at(constant as usize), writer);
+    writeln!(writer, "'").expect("write failed");
+    let v = &*chunk.constants.read_item_at(constant as usize);
+    if let Value::Object(Object::Closure(c)) = v {
+        let closure = (**c).borrow();
+        let function = &closure.function;
+        match function {
+            UserDefined(u) => {
+                for _ in 0..u.upvalue_count {
+                    let is_local = *chunk.code.read_item_at(offset);
+                    offset += 1;
+                    let index = *chunk.code.read_item_at(offset);
+                    offset += 1;
+                    writeln!(
+                        writer,
+                        "{:04}    |{:>38}{} {}",
+                        offset - 2,
+                        "",
+                        if is_local == 1 { "local" } else { "upvalue" },
+                        index
+                    )
+                    .expect("Write failed");
+                }
+            }
+        }
+    }
+    offset
+}
+
+pub fn disassemble_instruction(
+    byte: u8,
+    chunk: &Chunk,
+    offset: usize,
+    writer: &mut dyn Write,
+) -> usize {
     match Opcode::try_from(byte) {
         Ok(instruction) => match instruction {
-            Opcode::Constant | Opcode::DefineGlobal | Opcode::GetGlobal | Opcode::SetGlobal => {
-                constant_instruction(&instruction, chunk, offset, writer)
-            }
-            Opcode::SetLocal
-            | Opcode::GetLocal
-            | Opcode::Call
-            | Opcode::GetUpvalue
-            | Opcode::SetUpvalue => byte_instruction(&instruction, chunk, offset, writer),
-            Opcode::Jump | Opcode::JumpIfFalse | Opcode::JumpIfTrue => {
-                jump_instruction(&instruction, chunk, 1, offset, writer)
-            }
+            Opcode::Constant => constant_instruction(&instruction, chunk, offset, writer),
+            Opcode::SetLocal => byte_instruction(&instruction, chunk, offset, writer),
+            Opcode::Jump => jump_instruction(&instruction, chunk, 1, offset, writer),
             Opcode::Loop => jump_instruction(&instruction, chunk, -1, offset, writer),
             Opcode::Return => simple_instruction(&instruction, offset, writer),
             Opcode::Add => simple_instruction(&instruction, offset, writer),
@@ -145,40 +177,17 @@ pub fn disassemble_instruction(
             Opcode::LessEqual => simple_instruction(&instruction, offset, writer),
             Opcode::Print => simple_instruction(&instruction, offset, writer),
             Opcode::Pop => simple_instruction(&instruction, offset, writer),
-            Opcode::Closure => {
-                offset += 1;
-                let constant = *chunk.code.read_item_at(offset);
-                offset += 1;
-                write!(writer, "{:<30} {:4} '", instruction.to_string(), constant)
-                    .expect("Write failed");
-                print_value(&chunk.constants.read_item_at(constant as usize), writer);
-                writeln!(writer, "'").expect("write failed");
-                let v = &*chunk.constants.read_item_at(constant as usize);
-                if let Value::Object(Object::Closure(c)) = v {
-                    let closure = (**c).borrow();
-                    let function = &closure.function;
-                    match function {
-                        UserDefined(u) => {
-                            for _ in 0..u.upvalue_count {
-                                let is_local = *chunk.code.read_item_at(offset);
-                                offset += 1;
-                                let index = *chunk.code.read_item_at(offset);
-                                offset += 1;
-                                writeln!(
-                                    writer,
-                                    "{:04}   |{:>38} {} {}",
-                                    offset - 2,
-                                    "",
-                                    if is_local == 1 { "local" } else { "upvalue" },
-                                    index
-                                )
-                                .expect("Write failed");
-                            }
-                        }
-                    }
-                }
-                offset
-            }
+            Opcode::Closure => closure_instruction(&instruction, chunk, offset, writer),
+            Opcode::CloseUpvalue => simple_instruction(&instruction, offset, writer),
+            Opcode::DefineGlobal => constant_instruction(&instruction, chunk, offset, writer),
+            Opcode::GetGlobal => constant_instruction(&instruction, chunk, offset, writer),
+            Opcode::SetGlobal => constant_instruction(&instruction, chunk, offset, writer),
+            Opcode::GetLocal => byte_instruction(&instruction, chunk, offset, writer),
+            Opcode::Call => byte_instruction(&instruction, chunk, offset, writer),
+            Opcode::GetUpvalue => byte_instruction(&instruction, chunk, offset, writer),
+            Opcode::SetUpvalue => byte_instruction(&instruction, chunk, offset, writer),
+            Opcode::JumpIfFalse => jump_instruction(&instruction, chunk, 1, offset, writer),
+            Opcode::JumpIfTrue => jump_instruction(&instruction, chunk, 1, offset, writer),
         },
         Err(e) => {
             eprintln!(

@@ -20,7 +20,7 @@ impl Default for Chunk {
         Self::new()
     }
 }
-
+#[allow(unused)]
 impl Chunk {
     pub fn new() -> Self {
         Chunk {
@@ -43,6 +43,7 @@ impl Chunk {
         self.constants.read_item_at(offset as usize)
     }
 
+    #[allow(unused)]
     pub fn disassemble_chunk(&self, name: &str) {
         self.disassemble_chunk_with_writer(name, &mut stdout());
     }
@@ -98,7 +99,7 @@ pub struct Memory<T> {
     pub count: usize,
     pub read_index: usize,
 }
-
+#[allow(unused)]
 impl<T> Memory<T> {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
@@ -107,10 +108,6 @@ impl<T> Memory<T> {
             count: 0,
             read_index: 0,
         }
-    }
-
-    pub fn values_mut(&mut self) -> &mut Vec<RefCell<T>> {
-        &mut self.inner
     }
 
     #[inline]

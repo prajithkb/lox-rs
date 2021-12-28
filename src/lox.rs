@@ -162,3 +162,7 @@ pub fn print_error(e: Error, error_writer: &mut dyn Write) {
 fn print_error_kind_message(kind: &str, message: &str, error_writer: &mut dyn Write) {
     writeln!(error_writer, "{} {}", kind, message).expect("Write failed");
 }
+
+pub fn init_logger_for_test() {
+    let _ = env_logger::builder().is_test(true).try_init();
+}

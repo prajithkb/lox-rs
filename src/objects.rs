@@ -4,6 +4,7 @@ use crate::{chunk::Chunk, lox::Shared};
 
 #[derive(Debug, Clone)]
 pub enum Value {
+    Unitialized,
     Bool(bool),
     Nil,
     Number(f64),
@@ -17,15 +18,61 @@ impl Display for Value {
             Value::Nil => f.write_str("nil"),
             Value::Number(n) => f.write_str(&n.to_string()),
             Value::Object(o) => f.write_str(&o.to_string()),
+            Value::Unitialized => f.write_str("Uninitialized"),
         }
+    }
+}
+
+impl Default for Value {
+    fn default() -> Self {
+        Value::Unitialized
     }
 }
 
 #[derive(Debug, Clone)]
 pub enum Object {
     String(Shared<String>),
+    #[allow(unused)]
     Function(Shared<Function>),
+    Closure(Shared<Closure>),
     Nil,
+}
+
+#[derive(Debug, Clone)]
+pub struct Closure {
+    pub function: Function,
+    pub upvalues: Vec<Shared<Upvalue>>,
+}
+
+impl Closure {
+    pub fn new(function: Function) -> Self {
+        Closure {
+            function,
+            upvalues: Vec::new(),
+        }
+    }
+}
+
+impl Display for Closure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let fun = &self.function;
+        f.write_str(&fun.to_string())
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Upvalue {
+    pub location: *mut Value,
+    pub closed: Option<Value>,
+}
+
+impl Upvalue {
+    pub fn new(value: *mut Value) -> Self {
+        Upvalue {
+            location: value,
+            closed: None,
+        }
+    }
 }
 
 impl Display for Object {
@@ -37,6 +84,7 @@ impl Display for Object {
             }
             Object::Function(fun) => f.write_str(&((**fun).borrow()).to_string()),
             Object::Nil => f.write_str("Nil"),
+            Object::Closure(c) => f.write_str(&(*c.borrow()).to_string()),
         }
     }
 }
@@ -55,16 +103,6 @@ impl Object {
     #[inline]
     pub fn string(string: String) -> Object {
         Object::String(Rc::new(RefCell::new(string)))
-    }
-
-    #[inline]
-    pub fn function(function: Function) -> Object {
-        Object::Function(Object::shared_function(function))
-    }
-
-    #[inline]
-    pub fn shared_function(function: Function) -> Shared<Function> {
-        Rc::new(RefCell::new(function))
     }
 }
 
@@ -98,6 +136,7 @@ pub struct UserDefinedFunction {
     pub arity: usize,
     pub chunk: Chunk,
     pub name: Shared<String>,
+    pub upvalue_count: usize,
 }
 
 impl UserDefinedFunction {
@@ -107,6 +146,7 @@ impl UserDefinedFunction {
             arity,
             chunk,
             name,
+            upvalue_count: 0,
         }
     }
 }

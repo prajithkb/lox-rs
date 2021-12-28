@@ -3,6 +3,8 @@ use std::collections::LinkedList;
 use std::convert::TryFrom;
 use std::f64::EPSILON;
 use std::io::{stdout, Write};
+use std::mem::{self, MaybeUninit};
+use std::ops::Range;
 use std::time::Instant;
 
 use log::{info, log_enabled, trace, Level};
@@ -12,29 +14,31 @@ use crate::compiler::Compiler;
 use crate::errors::*;
 use crate::instructions::{print_value, Opcode};
 use crate::lox::{utf8_to_string, Shared, Writer};
-use crate::objects::{shared, Function, Object, Value, Values};
+use crate::objects::{shared, Closure, Function, Object, Upvalue, Value, Values};
 use crate::scanner::Scanner;
 use crate::tokens::pretty_print;
 #[derive(Debug)]
-pub struct CallFrame {
-    function: Shared<Function>,
-    starting_stack_pointer: usize,
+struct CallFrame {
+    function: Shared<Closure>,
+    fn_start_stack_ptr: usize,
 }
 
 impl CallFrame {
-    pub fn new(function: Shared<Function>, starting_stack_pointer: usize) -> Self {
+    fn new(function: Shared<Closure>, fn_start_stack_ptr: usize) -> Self {
         CallFrame {
             function,
-            starting_stack_pointer,
+            fn_start_stack_ptr,
         }
     }
 }
 
 pub struct VirtualMachine<'a> {
-    stack: Vec<Value>,
+    stack: [Value; 1024],
+    stack_top: usize,
     call_frames: Vec<CallFrame>,
     call_ips: LinkedList<usize>,
     runtime_values: Values,
+    up_values: LinkedList<Shared<Upvalue>>,
     custom_writer: Writer<'a>,
 }
 
@@ -54,11 +58,33 @@ impl<'a> VirtualMachine<'a> {
     }
 
     pub fn new_with_writer(custom_writer: Writer<'a>) -> Self {
+        let data = {
+            // Create an uninitialized array of `MaybeUninit`. The `assume_init` is
+            // safe because the type we are claiming to have initialized here is a
+            // bunch of `MaybeUninit`s, which do not require initialization.
+            let mut data: [MaybeUninit<Value>; 1024] =
+                unsafe { MaybeUninit::uninit().assume_init() };
+
+            // Dropping a `MaybeUninit` does nothing. Thus using raw pointer
+            // assignment instead of `ptr::write` does not cause the old
+            // uninitialized value to be dropped. Also if there is a panic during
+            // this loop, we have a memory leak, but there is no memory safety
+            // issue.
+            for elem in &mut data[..] {
+                elem.write(Value::default());
+            }
+
+            // Everything is initialized. Transmute the array to the
+            // initialized type.
+            unsafe { mem::transmute::<_, [Value; 1024]>(data) }
+        };
         VirtualMachine {
-            stack: Vec::new(),
+            stack: data,
+            stack_top: 0,
             call_frames: Vec::new(),
             runtime_values: Values::new(),
             call_ips: LinkedList::new(),
+            up_values: LinkedList::new(),
             custom_writer,
         }
     }
@@ -73,9 +99,9 @@ impl<'a> VirtualMachine<'a> {
         }
         let start_time = Instant::now();
         let compiler = Compiler::new(tokens);
-        let main_function = shared(compiler.compile()?);
+        let main_function = shared(Closure::new(compiler.compile()?));
         info!("Compiled in {} us", start_time.elapsed().as_micros());
-        self.push(Value::Object(Object::Function(main_function.clone())));
+        self.push(Value::Object(Object::Closure(main_function.clone())));
         self.call_frames
             .push(CallFrame::new(main_function.clone(), 0));
         self.call(main_function, 0)?;
@@ -155,16 +181,27 @@ impl<'a> VirtualMachine<'a> {
     }
 
     #[inline]
-    fn current_function_mut(&mut self) -> RefMut<Function> {
+    fn current_closure_mut(&mut self) -> RefMut<Closure> {
         let v = self.call_frame_mut();
         let v = &*v.function;
         v.borrow_mut()
     }
     #[inline]
-    fn current_function(&self) -> Ref<Function> {
+    fn current_closure(&self) -> Ref<Closure> {
         let v = self.call_frame();
         let v = &*v.function;
         v.borrow()
+    }
+
+    #[inline]
+    fn current_function_mut(&mut self) -> RefMut<Function> {
+        let v = self.current_closure_mut();
+        RefMut::map(v, |c| &mut c.function)
+    }
+    #[inline]
+    fn current_function(&self) -> Ref<Function> {
+        let v = self.current_closure();
+        Ref::map(v, |c| &c.function)
     }
 
     #[inline]
@@ -175,8 +212,6 @@ impl<'a> VirtualMachine<'a> {
     }
 
     fn run(&mut self) -> Result<()> {
-        // enable_log uncomment this line to enable logs for test
-        let _ = env_logger::builder().is_test(true).try_init();
         loop {
             let mut buf = vec![];
             if log_enabled!(Level::Trace) {
@@ -194,9 +229,10 @@ impl<'a> VirtualMachine<'a> {
                 ))
             })?;
             if log_enabled!(Level::Trace) {
-                let sanitized_stack: Vec<String> =
-                    self.stack.iter().map(|v| v.to_string()).collect();
-                trace!("Current Stack: {:?}", sanitized_stack);
+                trace!(
+                    "Current Stack: {:?}",
+                    self.sanitized_stack(0..self.stack_top, false)
+                );
                 let fun_name = (*self.current_function()).to_string();
                 trace!(
                     "In function {} Next Instruction: [{}]",
@@ -215,16 +251,17 @@ impl<'a> VirtualMachine<'a> {
                 }
                 Opcode::Return => {
                     trace!("Call frame count: {}", self.call_frames.len());
+                    let fn_starting_pointer = self.call_frame().fn_start_stack_ptr;
                     let result = self.pop();
+                    self.close_upvalues(fn_starting_pointer);
                     if self.call_frames.len() == 1 {
                         return Ok(());
                     }
                     let current_ip = self.call_ips.pop_back().expect("Expect ip");
-                    let frame = self.call_frames.pop().expect("Expect frame");
+                    self.call_frames.pop();
                     self.current_chunk_mut().code.read_index = current_ip;
-                    let fn_starting_pointer = frame.starting_stack_pointer;
                     // drop all the local values for the last function
-                    self.stack.truncate(fn_starting_pointer);
+                    self.stack_top = fn_starting_pointer;
                     // push the return result
                     self.push(result);
                 }
@@ -300,13 +337,13 @@ impl<'a> VirtualMachine<'a> {
                 }
                 Opcode::GetLocal => {
                     let index = self.read_byte();
-                    let fn_start_pointer = self.call_frame().starting_stack_pointer;
+                    let fn_start_pointer = self.call_frame().fn_start_stack_ptr;
                     let v = self.stack[fn_start_pointer + index as usize].clone();
                     self.push(v);
                 }
                 Opcode::SetLocal => {
                     let index = self.read_byte();
-                    let fn_start_pointer = self.call_frame().starting_stack_pointer;
+                    let fn_start_pointer = self.call_frame().fn_start_stack_ptr;
                     self.stack[fn_start_pointer + index as usize] = self.peek_at(0).clone();
                 }
                 Opcode::JumpIfFalse => {
@@ -333,35 +370,142 @@ impl<'a> VirtualMachine<'a> {
                     let arg_count = self.read_byte();
                     self.call_value(arg_count)?;
                 }
+                Opcode::Closure => {
+                    let closure = self.read_closure()?;
+                    self.push(Value::Object(Object::Closure(closure.clone())));
+                    let closure = &mut *(*closure).borrow_mut();
+                    let fn_start_stack_ptr = self.call_frame().fn_start_stack_ptr;
+                    match &closure.function {
+                        Function::UserDefined(u) => {
+                            for _ in 0..u.upvalue_count {
+                                let is_local = self.read_byte();
+                                let index = self.read_byte();
+                                if is_local > 0 {
+                                    let local: *mut Value =
+                                        &mut self.stack[fn_start_stack_ptr + index as usize];
+                                    let captured_upvalue = self.capture_upvalue(local);
+                                    closure.upvalues.push(captured_upvalue);
+                                } else {
+                                    let upvalue = closure.upvalues[index as usize].clone();
+                                    closure.upvalues.push(upvalue);
+                                }
+                            }
+                        }
+                    }
+                }
+                Opcode::GetUpvalue => {
+                    let slot = self.read_byte();
+                    let closure = self.current_closure();
+                    let upvalue = (&*closure.upvalues[slot as usize]).borrow();
+                    let location = upvalue.location;
+                    drop(upvalue);
+                    drop(closure);
+                    unsafe {
+                        let value = (&*location).clone();
+                        self.push(value);
+                    }
+                }
+                Opcode::SetUpvalue => {
+                    let slot = self.read_byte();
+                    let value = self.peek_at(slot as usize).clone();
+                    let closure = self.current_closure_mut();
+                    let upvalue = &closure.upvalues[slot as usize];
+                    let upvalue = (&**upvalue).borrow();
+                    let location = upvalue.location;
+                    drop(upvalue);
+                    drop(closure);
+                    unsafe {
+                        *location = value;
+                    }
+                }
+                Opcode::CloseUpvalue => {
+                    self.close_upvalues(self.stack_top - 1);
+                    self.pop();
+                }
             };
         }
     }
 
-    fn call_value(&mut self, arg_count: u8) -> Result<()> {
-        match self.peek_at(arg_count as usize) {
-            Value::Object(Object::Function(f)) => {
-                let function = f.clone();
-                let starting_pointer = self.stack.len() - arg_count as usize - 1;
-                self.call_ips.push_back(self.ip());
-                let frame = CallFrame::new(function.clone(), starting_pointer);
-                self.call_frames.push(frame);
-                self.call(function, arg_count as usize)?;
-                Ok(())
-            }
-            _ => bail!(self.runtime_error("Not a function")),
+    fn sanitized_stack(&mut self, range: Range<usize>, with_address: bool) -> Vec<String> {
+        let s: Vec<String> = self.stack[range]
+            .iter()
+            .enumerate()
+            .map(|(i, v)| {
+                if with_address {
+                    format!("{}:({:p}->{})", i, v as *const _, v)
+                } else {
+                    format!("{}:({})", i, v)
+                }
+            })
+            .collect();
+        s
+    }
+    fn close_upvalues(&mut self, top: usize) {
+        let last: *mut Value = &mut self.stack[top];
+        let upvalue_iter = self.up_values.iter_mut().rev();
+        let mut count = 0;
+        upvalue_iter
+            .map(|u| (**u).borrow_mut())
+            .take_while(|u| u.location >= last)
+            .for_each(|mut u| unsafe {
+                count += 1;
+                let value = (*u.location).clone();
+                u.closed = Some(value);
+                let location: *mut Value = u.closed.as_mut().expect("expect mut ref");
+                u.location = location;
+            });
+        let _captured_values = self.up_values.split_off(self.up_values.len() - count);
+    }
+
+    fn capture_upvalue(&mut self, value: *mut Value) -> Shared<Upvalue> {
+        let upvalue_iter = self.up_values.iter().rev();
+        let upvalue = upvalue_iter
+            .take_while(|u| {
+                let upvalue = (**u).borrow_mut();
+                upvalue.location >= value
+            })
+            .find(|u| {
+                let upvalue = (**u).borrow_mut();
+                upvalue.location == value
+            });
+        if let Some(u) = upvalue {
+            u.clone()
+        } else {
+            let created_value = shared(Upvalue::new(value));
+            self.up_values.push_back(created_value.clone());
+            created_value
         }
     }
 
-    fn call(&mut self, function: Shared<Function>, arg_count: usize) -> Result<bool> {
-        let mut function = &mut *function.borrow_mut();
-        match &mut function {
+    fn call_value(&mut self, arg_count: u8) -> Result<()> {
+        let v = self.peek_at(arg_count as usize);
+        match &*v {
+            Value::Object(Object::Closure(c)) => {
+                let closure = c.clone();
+                let starting_pointer = self.stack_top - arg_count as usize - 1;
+                self.call_ips.push_back(self.ip());
+                let frame = CallFrame::new(closure.clone(), starting_pointer);
+                self.call_frames.push(frame);
+                self.call(closure, arg_count as usize)?;
+                Ok(())
+            }
+            _ => bail!(self.runtime_error("Not a function/closure")),
+        }
+    }
+
+    fn call(&mut self, closure: Shared<Closure>, arg_count: usize) -> Result<bool> {
+        let closure = (*closure).borrow_mut();
+        let mut function = get_function_mut(closure);
+        match &mut *function {
             Function::UserDefined(u) => {
                 u.chunk.code.read_index = 0;
-                if u.arity != arg_count {
+                let arity = u.arity;
+                if arity != arg_count {
+                    drop(function);
                     self.call_frames.pop();
                     bail!(self.runtime_error(&format!(
                         "Expected {} arguments but got {}",
-                        u.arity, arg_count
+                        arity, arg_count
                     )))
                 }
             }
@@ -394,20 +538,42 @@ impl<'a> VirtualMachine<'a> {
         }
     }
 
+    fn read_closure(&mut self) -> Result<Shared<Closure>> {
+        let mut chunk = self.current_chunk_mut();
+        let constant = chunk.read_constant();
+        let nil = &Object::Nil;
+        let object = Ref::map(constant, |c| match c {
+            Value::Object(o) => o,
+            _ => nil,
+        });
+        if *object != *nil {
+            match &*object {
+                Object::Closure(s) => Ok(s.clone()),
+                _ => {
+                    drop(object);
+                    drop(chunk);
+                    bail!(self.runtime_error("Not a string"))
+                }
+            }
+        } else {
+            drop(object);
+            drop(chunk);
+            let line = self.current_chunk().current_line();
+            bail!(runtime_vm_error(line, "Unable to read object"))
+        }
+    }
+
     fn runtime_error(&self, message: &str) -> ErrorKind {
         let mut error_buf = vec![];
         writeln!(error_buf, "{}", message).expect("Write failed");
         for frame in (&self.call_frames).iter().rev() {
-            let function = (&*frame.function).borrow();
+            let closure = (&*frame.function).borrow();
+            let function = get_function(closure);
             let fun_name = &function.to_string();
             match &*function {
                 Function::UserDefined(u) => {
                     let ip = u.chunk.code.read_index;
-                    let line_num = u.chunk.lines[ip - 1];
-                    // if log_enabled!(Level::Trace) {
-                    //     u.chunk
-                    //         .disassemble_chunk_with_writer(fun_name, &mut error_buf);
-                    // }
+                    let line_num = u.chunk.lines[ip];
                     writeln!(error_buf, "[line {}] in {}", line_num, fun_name)
                         .expect("Write failed")
                 }
@@ -420,8 +586,8 @@ impl<'a> VirtualMachine<'a> {
     }
 
     fn peek_at(&self, distance: usize) -> &Value {
-        let top = self.stack.len();
-        self.stack.get(top - 1 - distance).expect("Out of bounds")
+        let top = self.stack_top;
+        &self.stack[top - 1 - distance]
     }
 
     fn equals(&mut self) -> Result<bool> {
@@ -450,7 +616,11 @@ impl<'a> VirtualMachine<'a> {
                 Ok(())
             }
             (Value::Number(_), Value::Number(_)) => self.binary_op(|a, b| Value::Number(a + b)),
-            _ => bail!(self.runtime_error("Add can be perfomed only on numbers or strings")),
+            _ => bail!(self.runtime_error(&format!(
+                "Add can be perfomed only on numbers or strings, got {} and {}",
+                self.peek_at(1),
+                self.peek_at(0)
+            ))),
         }
     }
 
@@ -467,12 +637,15 @@ impl<'a> VirtualMachine<'a> {
         Ok(())
     }
 
+    #[inline]
     fn push(&mut self, value: Value) {
-        self.stack.push(value);
+        self.stack[self.stack_top] = value;
+        self.stack_top += 1;
     }
-
+    #[inline]
     fn pop(&mut self) -> Value {
-        self.stack.pop().expect("Cannot be empty")
+        self.stack_top -= 1;
+        std::mem::take(&mut self.stack[self.stack_top])
     }
 
     pub fn free(&mut self) {
@@ -523,6 +696,13 @@ fn is_falsey(value: &Value) -> bool {
 
 fn print_stack_value(value: &Value, writer: &mut dyn Write) {
     print_value(value, writer);
+}
+fn get_function_mut(closure: RefMut<Closure>) -> RefMut<Function> {
+    RefMut::map(closure, |c| &mut c.function)
+}
+
+fn get_function(closure: Ref<Closure>) -> Ref<Function> {
+    Ref::map(closure, |c| &c.function)
 }
 
 #[cfg(test)]
@@ -763,6 +943,66 @@ mod tests {
         "#;
         vm.interpret(source.to_string())?;
         assert_eq!("55\n", utf8_to_string(&buf));
+        Ok(())
+    }
+
+    #[test]
+    fn vm_closure() -> Result<()> {
+        let mut buf = vec![];
+        let mut vm = VirtualMachine::new_with_writer(Some(&mut buf));
+        let source = r#"
+        fun outer() {
+            var x = "outside";
+            fun inner() {
+              print x;
+            }
+            inner();
+          }
+        outer();
+        "#;
+        vm.interpret(source.to_string())?;
+        assert_eq!("outside\n", utf8_to_string(&buf));
+
+        let mut buf = vec![];
+        let mut vm = VirtualMachine::new_with_writer(Some(&mut buf));
+        let source = r#"
+        fun outer() {
+            var x = "outside";
+            fun inner() {
+              print x;
+            }
+          
+            return inner;
+          }
+          
+        var closure = outer();
+        closure();
+        "#;
+        vm.interpret(source.to_string())?;
+        assert_eq!("outside\n", utf8_to_string(&buf));
+
+        let mut buf = vec![];
+        let mut vm = VirtualMachine::new_with_writer(Some(&mut buf));
+        let source = r#"
+        var globalSet;
+        var globalGet;
+
+        fun main() {
+          var a = "initial";
+
+          fun set() { a = "updated"; }
+          fun get() { print a; }
+
+          globalSet = set;
+          globalGet = get;
+        }
+
+        main();
+        globalSet();
+        globalGet();
+        "#;
+        vm.interpret(source.to_string())?;
+        assert_eq!("updated\n", utf8_to_string(&buf));
         Ok(())
     }
 }

@@ -114,12 +114,17 @@ const GLOBAL_SCOPE_DEPTH: usize = 0;
 struct Local<'a> {
     name: &'a str,
     depth: Option<usize>,
+    is_captured: bool,
 }
 
 impl<'a> Local<'a> {
     #[allow(clippy::new_without_default)]
     fn new(name: &'a str, depth: Option<usize>) -> Self {
-        Local { name, depth }
+        Local {
+            name,
+            depth,
+            is_captured: false,
+        }
     }
 }
 #[derive(Debug, PartialEq)]
@@ -488,6 +493,8 @@ impl<'a> Compiler<'a> {
     ) -> Result<Option<u8>> {
         if let Some(enclosing) = state_iter.next() {
             if let Some(index) = Compiler::resolve_local_with_state(name, enclosing)? {
+                let local = &mut enclosing.scope.locals[index as usize];
+                local.is_captured = true;
                 Ok(Some(Compiler::add_upvalue(index, current, true)))
             } else if let Some(index) =
                 Compiler::resolve_upvalue_with_state(enclosing, state_iter, name)?
@@ -648,8 +655,16 @@ impl<'a> Compiler<'a> {
                 .expect("Expect depth")
                 > self.current_scope_mut().depth
             {
-                self.current_scope_mut().locals.pop();
-                self.emit_op_code(Opcode::Pop);
+                let local = self
+                    .current_scope_mut()
+                    .locals
+                    .pop()
+                    .expect("local expected");
+                if local.is_captured {
+                    self.emit_op_code(Opcode::CloseUpvalue);
+                } else {
+                    self.emit_op_code(Opcode::Pop);
+                }
             } else {
                 break;
             }
@@ -847,14 +862,16 @@ impl<'a> Compiler<'a> {
 
     fn end_function(&mut self) {
         self.emit_return();
-        if log_enabled!(log::Level::Trace) {
-            let name = &self.state.function.to_string();
-            match &mut self.custom_writer {
-                Some(w) => self.current_chunk().disassemble_chunk_with_writer(name, w),
-                None => self
-                    .current_chunk()
-                    .disassemble_chunk_with_writer(name, &mut stdout()),
-            }
+        let name = &self.state.function.to_string();
+        if self.custom_writer.is_some() {
+            let mut writer_opt = self.custom_writer.take();
+            let writer = writer_opt.as_deref_mut().expect("Writer expected");
+            self.current_chunk()
+                .disassemble_chunk_with_writer(name, writer);
+            self.custom_writer = writer_opt;
+        } else if log_enabled!(log::Level::Trace) {
+            self.current_chunk()
+                .disassemble_chunk_with_writer(name, &mut stdout());
         }
     }
 
@@ -1034,7 +1051,10 @@ fn as_two_bytes(jump: usize) -> (u8, u8) {
 
 #[cfg(test)]
 mod tests {
-    use crate::{errors::*, lox::utf8_to_string, objects::Function::UserDefined, scanner::Scanner};
+    use crate::{
+        compiler::FunctionType::Script, errors::*, lox::utf8_to_string,
+        objects::Function::UserDefined, scanner::Scanner,
+    };
 
     use super::Compiler;
 
@@ -1505,6 +1525,7 @@ mod tests {
 
     #[test]
     fn closure() -> Result<()> {
+        // let _ = env_logger::builder().is_test(true).try_init();
         let source = r#"fun outer() {
             var a = 1;
             var b = 2;
@@ -1519,16 +1540,44 @@ mod tests {
         "#;
         let mut scanner = Scanner::new(source.to_string());
         let tokens = scanner.scan_tokens()?;
-        let compiler = Compiler::new(tokens);
-        let function = compiler.compile()?;
         let mut buf = vec![];
-        match &function {
-            UserDefined(u) => {
-                u.chunk.disassemble_chunk_with_writer("test", &mut buf);
-            }
-        }
+        let compiler = Compiler::new_with_type_and_writer(tokens, Script, Some(&mut buf));
+        let _ = compiler.compile()?;
         assert_eq!(
-            r#"== test ==
+            r#"== <fn inner> ==
+0000 0008 OpCode[GetUpvalue]                0
+0002    | OpCode[GetUpvalue]                1
+0004    | OpCode[Add]
+0005    | OpCode[GetUpvalue]                2
+0007    | OpCode[Add]
+0008    | OpCode[GetUpvalue]                3
+0010    | OpCode[Add]
+0011    | OpCode[Print]
+0012 0009 OpCode[Nil]
+0013    | OpCode[Return]
+== <fn middle> ==
+0000 0005 OpCode[Constant]                  0 '3'
+0002 0006 OpCode[Constant]                  1 '4'
+0004 0009 OpCode[Closure]                   2 '<fn inner>'
+0006    |                                      upvalue 0
+0008    |                                      local 1
+0010    |                                      upvalue 1
+0012    |                                      local 2
+0014 0010 OpCode[Nil]
+0015    | OpCode[Return]
+== <fn outer> ==
+0000 0002 OpCode[Constant]                  0 '1'
+0002 0003 OpCode[Constant]                  1 '2'
+0004 0010 OpCode[Closure]                   2 '<fn middle>'
+0006    |                                      local 1
+0008    |                                      local 2
+0010 0011 OpCode[Nil]
+0011    | OpCode[Return]
+== <fn script> ==
+0000 0011 OpCode[Closure]                   1 '<fn outer>'
+0002    | OpCode[DefineGlobal]              0 'outer'
+0004    | OpCode[Nil]
+0005    | OpCode[Return]
 "#,
             utf8_to_string(&buf)
         );
