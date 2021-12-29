@@ -32,17 +32,18 @@ impl Default for Value {
 #[derive(Debug, Clone)]
 pub enum Object {
     String(String),
-    Closure(Shared<Closure>),
+    Function(Rc<Function>),
+    Closure(Closure),
 }
 
 #[derive(Debug, Clone)]
 pub struct Closure {
-    pub function: Function,
+    pub function: Rc<Function>,
     pub upvalues: Vec<Shared<Upvalue>>,
 }
 
 impl Closure {
-    pub fn new(function: Function) -> Self {
+    pub fn new(function: Rc<Function>) -> Self {
         Closure {
             function,
             upvalues: Vec::new(),
@@ -76,7 +77,8 @@ impl Display for Object {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self {
             Object::String(s) => f.write_str(s),
-            Object::Closure(c) => f.write_str(&(*c.borrow()).to_string()),
+            Object::Closure(c) => f.write_str(&c.to_string()),
+            Object::Function(fun) => f.write_str(&fun.to_string()),
         }
     }
 }

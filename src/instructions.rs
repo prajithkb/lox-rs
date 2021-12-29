@@ -121,9 +121,8 @@ pub fn closure_instruction(
     print_value(chunk.constants.read_item_at(constant as usize), writer);
     writeln!(writer, "'").expect("write failed");
     let v = &*chunk.constants.read_item_at(constant as usize);
-    if let Value::Object(Object::Closure(c)) = v {
-        let closure = (**c).borrow();
-        let function = &closure.function;
+    if let Value::Object(Object::Function(c)) = v {
+        let function = &**c;
         match function {
             UserDefined(u) => {
                 for _ in 0..u.upvalue_count {

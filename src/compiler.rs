@@ -2,6 +2,7 @@ use std::{
     collections::{linked_list::IterMut, LinkedList},
     io::stdout,
     iter::Rev,
+    rc::Rc,
 };
 
 use log::log_enabled;
@@ -12,7 +13,7 @@ use crate::{
     errors::*,
     instructions::Opcode,
     lox::Writer,
-    objects::{shared, Closure, Function, Object, UserDefinedFunction, Value},
+    objects::{Function, Object, UserDefinedFunction, Value},
     tokens::{Literal, TokenType},
 };
 
@@ -402,7 +403,7 @@ impl<'a> Compiler<'a> {
         self.end_function();
         let state = self.end_new_function();
         let up_values = &state.upvalues;
-        let closure = Value::Object(Object::Closure(shared(Closure::new(state.function))));
+        let closure = Value::Object(Object::Function(Rc::new(state.function)));
         let byte = self.add_constant(closure);
         self.emit_opcode_and_bytes(Opcode::Closure, byte);
         for u in up_values {

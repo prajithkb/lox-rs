@@ -1,10 +1,10 @@
-use std::cell::{Ref, RefMut};
 use std::collections::LinkedList;
 use std::convert::TryFrom;
 use std::f64::EPSILON;
 use std::io::{stdout, Write};
 use std::mem::{self, MaybeUninit};
 use std::ops::Range;
+use std::rc::Rc;
 use std::time::Instant;
 
 use log::{info, log_enabled, trace, Level};
@@ -17,19 +17,20 @@ use crate::lox::{utf8_to_string, Shared, Writer};
 use crate::objects::{shared, Closure, Function, Object, Upvalue, Value, Values};
 use crate::scanner::Scanner;
 use crate::tokens::pretty_print;
+
 #[derive(Debug)]
 struct CallFrame {
-    function: Shared<Closure>,
-    fn_start_stack_ptr: usize,
+    fn_start_stack_index: usize,
     ip: usize,
+    closure_stack_index: usize,
 }
 
 impl CallFrame {
-    fn new(function: Shared<Closure>, fn_start_stack_ptr: usize) -> Self {
+    fn new(fn_start_stack_index: usize, closure_stack_index: usize) -> Self {
         CallFrame {
-            function,
-            fn_start_stack_ptr,
+            fn_start_stack_index,
             ip: 0,
+            closure_stack_index,
         }
     }
 }
@@ -99,12 +100,13 @@ impl<'a> VirtualMachine<'a> {
         }
         let start_time = Instant::now();
         let compiler = Compiler::new(tokens);
-        let main_function = shared(Closure::new(compiler.compile()?));
+        let main_function = Rc::new(compiler.compile()?);
         info!("Compiled in {} us", start_time.elapsed().as_micros());
-        self.push(Value::Object(Object::Closure(main_function.clone())));
-        self.call_frames
-            .push(CallFrame::new(main_function.clone(), 0));
+        self.push(Value::Object(Object::Closure(Closure::new(
+            main_function.clone(),
+        ))));
         self.call(main_function, 0)?;
+        self.call_frames.push(CallFrame::new(0, 0));
         let start_time = Instant::now();
         let result = self.run();
         info!("Ran in {} us", start_time.elapsed().as_micros());
@@ -152,65 +154,71 @@ impl<'a> VirtualMachine<'a> {
         self.call_frame_mut().ip = index;
     }
 
-    fn read_byte_without_increment(&self) -> u8 {
-        let ip = self.ip();
+    #[inline]
+    fn read_byte_at(&self, ip: usize) -> u8 {
         let chunk = &*self.current_chunk();
-        let v = chunk.code.read_item_at(ip);
-        *v
+        *chunk.code.read_item_at(ip)
     }
 
     #[inline]
     fn read_byte(&mut self) -> u8 {
-        let v = self.read_byte_without_increment();
+        let ip = self.ip();
+        let v = self.read_byte_at(ip);
         self.call_frame_mut().ip += 1;
         v
     }
 
     #[inline]
     fn read_constant(&mut self) -> Value {
-        let v = self.read_constant_without_increment();
+        let ip = self.ip();
+        let v = self.read_constant_at(ip).clone();
         self.call_frame_mut().ip += 1;
         v
     }
 
     #[inline]
-    fn read_constant_as_ref_without_increment(&self) -> Ref<Value> {
-        let ip = self.call_frame().ip;
-        let v = Ref::map(self.current_chunk(), |c| c.read_constant_at(ip));
-        v
+    fn read_constant_at(&self, ip: usize) -> &Value {
+        let chunk = self.current_chunk();
+        chunk.read_constant_at(ip)
     }
 
     #[inline]
-    fn read_constant_without_increment(&self) -> Value {
-        let v = self.read_constant_as_ref_without_increment();
-        v.clone()
-    }
-
-    #[inline]
-    fn current_chunk(&self) -> Ref<Chunk> {
+    fn current_chunk(&self) -> &Chunk {
         let function = self.current_function();
-        Ref::map(function, |f| match f {
+        match function {
             Function::UserDefined(u) => &u.chunk,
-        })
+        }
     }
 
     #[inline]
-    fn current_closure_mut(&mut self) -> RefMut<Closure> {
-        let v = self.call_frame_mut();
-        let v = &*v.function;
-        v.borrow_mut()
+    fn current_closure_mut(&mut self) -> &mut Closure {
+        let index = self.call_frame().closure_stack_index;
+        self.closure_from_stack_mut(index)
     }
     #[inline]
-    fn current_closure(&self) -> Ref<Closure> {
-        let v = self.call_frame();
-        let v = &*v.function;
-        v.borrow()
+    fn current_closure(&self) -> &Closure {
+        let index = self.call_frame().closure_stack_index;
+        self.closure_from_stack(index)
+    }
+
+    fn closure_from_stack_mut(&mut self, index: usize) -> &mut Closure {
+        match &mut self.stack[index] {
+            Value::Object(Object::Closure(c)) => c,
+            _ => panic!("unreachable"),
+        }
+    }
+
+    fn closure_from_stack(&self, index: usize) -> &Closure {
+        match &self.stack[index] {
+            Value::Object(Object::Closure(c)) => c,
+            _ => panic!("unreachable"),
+        }
     }
 
     #[inline]
-    fn current_function(&self) -> Ref<Function> {
+    fn current_function(&self) -> &Function {
         let v = self.current_closure();
-        Ref::map(v, |c| &c.function)
+        &v.function
     }
 
     #[inline]
@@ -257,7 +265,7 @@ impl<'a> VirtualMachine<'a> {
                 }
                 Opcode::Return => {
                     trace!("Call frame count: {}", self.call_frames.len());
-                    let fn_starting_pointer = self.call_frame().fn_start_stack_ptr;
+                    let fn_starting_pointer = self.call_frame().fn_start_stack_index;
                     let result = self.pop();
                     self.close_upvalues(fn_starting_pointer);
                     if self.call_frames.len() == 1 {
@@ -310,12 +318,13 @@ impl<'a> VirtualMachine<'a> {
                     self.pop();
                 }
                 Opcode::DefineGlobal => {
-                    let name = &*self.read_string()?;
                     let value = self.pop();
-                    self.runtime_values.insert(name.to_string(), value);
+                    let name = self.read_string()?.to_string();
+                    self.increment_ip_by(1);
+                    self.runtime_values.insert(name, value);
                 }
                 Opcode::GetGlobal => {
-                    let name = &self.read_string()?;
+                    let name = self.read_string()?;
                     let value = self.runtime_values.get(name);
                     if let Some(v) = value {
                         let v = v.clone();
@@ -323,28 +332,32 @@ impl<'a> VirtualMachine<'a> {
                     } else {
                         bail!(self.runtime_error(&format!("Undefined variable '{}'", &name)))
                     }
+                    self.increment_ip_by(1);
                 }
                 Opcode::SetGlobal => {
-                    let name = &self.read_string()?;
+                    let name = self.read_string()?.to_string();
+                    self.increment_ip_by(1);
                     let value = self.peek_at(0).clone();
-                    match self.runtime_values.get_mut(name) {
+                    let v = self.runtime_values.get_mut(&name);
+                    match v {
                         Some(e) => {
                             *e = value;
                         }
                         None => {
-                            bail!(self.runtime_error(&format!("Undefined variable '{}'", &name)))
+                            drop(v);
+                            bail!(self.runtime_error(&format!("Undefined variable '{}'", name)))
                         }
                     }
                 }
                 Opcode::GetLocal => {
                     let index = self.read_byte();
-                    let fn_start_pointer = self.call_frame().fn_start_stack_ptr;
+                    let fn_start_pointer = self.call_frame().fn_start_stack_index;
                     let v = self.stack[fn_start_pointer + index as usize].clone();
                     self.push(v);
                 }
                 Opcode::SetLocal => {
                     let index = self.read_byte();
-                    let fn_start_pointer = self.call_frame().fn_start_stack_ptr;
+                    let fn_start_pointer = self.call_frame().fn_start_stack_index;
                     self.stack[fn_start_pointer + index as usize] = self.peek_at(0).clone();
                 }
                 Opcode::JumpIfFalse => {
@@ -372,11 +385,10 @@ impl<'a> VirtualMachine<'a> {
                     self.call_value(arg_count)?;
                 }
                 Opcode::Closure => {
-                    let closure = self.read_closure()?;
-                    self.push(Value::Object(Object::Closure(closure.clone())));
-                    let closure = &mut *(*closure).borrow_mut();
-                    let fn_start_stack_ptr = self.call_frame().fn_start_stack_ptr;
-                    match &closure.function {
+                    let function = self.read_function()?;
+                    let fn_start_stack_ptr = self.call_frame().fn_start_stack_index;
+                    let mut closure = Closure::new(function.clone());
+                    match &*function {
                         Function::UserDefined(u) => {
                             for _ in 0..u.upvalue_count {
                                 let is_local = self.read_byte();
@@ -393,6 +405,7 @@ impl<'a> VirtualMachine<'a> {
                             }
                         }
                     }
+                    self.push(Value::Object(Object::Closure(closure)));
                 }
                 Opcode::GetUpvalue => {
                     let slot = self.read_byte();
@@ -400,7 +413,6 @@ impl<'a> VirtualMachine<'a> {
                     let upvalue = (&*closure.upvalues[slot as usize]).borrow();
                     let location = upvalue.location;
                     drop(upvalue);
-                    drop(closure);
                     unsafe {
                         let value = (&*location).clone();
                         self.push(value);
@@ -414,7 +426,6 @@ impl<'a> VirtualMachine<'a> {
                     let upvalue = (&**upvalue).borrow();
                     let location = upvalue.location;
                     drop(upvalue);
-                    drop(closure);
                     unsafe {
                         *location = value;
                     }
@@ -427,7 +438,7 @@ impl<'a> VirtualMachine<'a> {
         }
     }
 
-    fn sanitized_stack(&mut self, range: Range<usize>, with_address: bool) -> Vec<String> {
+    fn sanitized_stack(&self, range: Range<usize>, with_address: bool) -> Vec<String> {
         let s: Vec<String> = self.stack[range]
             .iter()
             .enumerate()
@@ -479,30 +490,27 @@ impl<'a> VirtualMachine<'a> {
     }
 
     fn call_value(&mut self, arg_count: u8) -> Result<()> {
+        let closure_stack_index = self.stack_top - 1 - arg_count as usize;
         let v = self.peek_at(arg_count as usize);
         match &*v {
             Value::Object(Object::Closure(c)) => {
                 let closure = c.clone();
-                let starting_pointer = self.stack_top - arg_count as usize - 1;
-                let frame = CallFrame::new(closure.clone(), starting_pointer);
+                let fn_start_stack_ptr = self.stack_top - arg_count as usize - 1;
+                let frame = CallFrame::new(fn_start_stack_ptr, closure_stack_index);
+                self.call(closure.function, arg_count as usize)?;
                 self.call_frames.push(frame);
-                self.call(closure, arg_count as usize)?;
                 Ok(())
             }
             _ => bail!(self.runtime_error("Not a function/closure")),
         }
     }
 
-    fn call(&mut self, closure: Shared<Closure>, arg_count: usize) -> Result<bool> {
-        let closure = (*closure).borrow_mut();
-        let mut function = get_function_mut(closure);
-        match &mut *function {
+    fn call(&mut self, closure: Rc<Function>, arg_count: usize) -> Result<bool> {
+        let function = &*closure;
+        match function {
             Function::UserDefined(u) => {
-                self.set_ip(0);
                 let arity = u.arity;
                 if arity != arg_count {
-                    drop(function);
-                    self.call_frames.pop();
                     bail!(self.runtime_error(&format!(
                         "Expected {} arguments but got {}",
                         arity, arg_count
@@ -513,18 +521,18 @@ impl<'a> VirtualMachine<'a> {
         Ok(true)
     }
 
-    fn read_string(&mut self) -> Result<String> {
-        let constant = self.read_constant();
+    fn read_string(&self) -> Result<&str> {
+        let constant = self.read_constant_at(self.ip());
         match constant {
             Value::Object(Object::String(s)) => Ok(s),
-            _ => bail!(self.runtime_error("Not a string")),
+            _ => Err(self.runtime_error("message").into()),
         }
     }
 
-    fn read_closure(&mut self) -> Result<Shared<Closure>> {
+    fn read_function(&mut self) -> Result<Rc<Function>> {
         let constant = self.read_constant();
         match constant {
-            Value::Object(Object::Closure(s)) => Ok(s),
+            Value::Object(Object::Function(s)) => Ok(s),
             _ => bail!(self.runtime_error("Not a Closure")),
         }
     }
@@ -533,8 +541,8 @@ impl<'a> VirtualMachine<'a> {
         let mut error_buf = vec![];
         writeln!(error_buf, "{}", message).expect("Write failed");
         for frame in (&self.call_frames).iter().rev() {
-            let closure = (&*frame.function).borrow();
-            let function = get_function(closure);
+            let stack_index = frame.closure_stack_index;
+            let function = &*self.closure_from_stack(stack_index).function;
             let fun_name = &function.to_string();
             match &*function {
                 Function::UserDefined(u) => {
@@ -661,13 +669,6 @@ fn is_falsey(value: &Value) -> bool {
 fn print_stack_value(value: &Value, writer: &mut dyn Write) {
     print_value(value, writer);
 }
-fn get_function_mut(closure: RefMut<Closure>) -> RefMut<Function> {
-    RefMut::map(closure, |c| &mut c.function)
-}
-
-fn get_function(closure: Ref<Closure>) -> Ref<Function> {
-    Ref::map(closure, |c| &c.function)
-}
 
 #[cfg(test)]
 mod tests {
@@ -706,7 +707,7 @@ mod tests {
     }
 
     #[test]
-    fn vn_string_expressions() -> Result<()> {
+    fn vm_string_expressions() -> Result<()> {
         let mut buf = vec![];
         let mut vm = VirtualMachine::new_with_writer(Some(&mut buf));
         let source = r#"
