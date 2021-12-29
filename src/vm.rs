@@ -91,6 +91,7 @@ impl<'a> VirtualMachine<'a> {
     }
 
     pub fn interpret(&mut self, source: String) -> Result<()> {
+        self.reset_vm();
         let mut scanner = Scanner::new(source);
         let start_time = Instant::now();
         let tokens = scanner.scan_tokens()?;
@@ -111,6 +112,11 @@ impl<'a> VirtualMachine<'a> {
         let result = self.run();
         info!("Ran in {} us", start_time.elapsed().as_micros());
         result
+    }
+
+    fn reset_vm(&mut self) {
+        self.call_frames.clear();
+        self.stack_top = 0;
     }
 
     #[inline]
