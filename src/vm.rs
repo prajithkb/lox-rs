@@ -399,7 +399,8 @@ impl<'a> VirtualMachine<'a> {
                                     let captured_upvalue = self.capture_upvalue(local);
                                     closure.upvalues.push(captured_upvalue);
                                 } else {
-                                    let upvalue = closure.upvalues[index as usize].clone();
+                                    let current_closure = self.current_closure();
+                                    let upvalue = current_closure.upvalues[index as usize].clone();
                                     closure.upvalues.push(upvalue);
                                 }
                             }
