@@ -4,6 +4,7 @@ use std::f64::EPSILON;
 use std::io::{stdout, Write};
 use std::mem::{self, MaybeUninit};
 use std::ops::Range;
+use std::panic;
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -14,7 +15,7 @@ use crate::compiler::Compiler;
 use crate::errors::*;
 use crate::instructions::{print_value, Opcode};
 use crate::lox::{utf8_to_string, Shared, Writer};
-use crate::objects::{shared, Closure, Function, Object, Upvalue, Value, Values};
+use crate::objects::{shared, Closure, Function, Location, Object, Upvalue, Value, Values};
 use crate::scanner::Scanner;
 use crate::tokens::pretty_print;
 
@@ -35,12 +36,28 @@ impl CallFrame {
     }
 }
 
+// #[derive(Clone)]
+// struct UpvalueInStack {
+//     stack_index: usize,
+//     upvalue: Shared<Upvalue>,
+// }
+
+// impl UpvalueInStack {
+//     fn new(stack_index: usize, upvalue: Shared<Upvalue>) -> Self {
+//         UpvalueInStack {
+//             stack_index,
+//             upvalue,
+//         }
+//     }
+// }
+
 pub struct VirtualMachine<'a> {
     stack: [Value; 1024],
     stack_top: usize,
     call_frames: Vec<CallFrame>,
     runtime_values: Values,
     up_values: LinkedList<Shared<Upvalue>>,
+    // up_values_in_stack: LinkedList<UpvalueInStack>,
     custom_writer: Writer<'a>,
 }
 
@@ -53,6 +70,29 @@ impl<'a> std::fmt::Debug for VirtualMachine<'a> {
     }
 }
 
+fn init_stack() -> [Value; 1024] {
+    let data = {
+        // Create an uninitialized array of `MaybeUninit`. The `assume_init` is
+        // safe because the type we are claiming to have initialized here is a
+        // bunch of `MaybeUninit`s, which do not require initialization.
+        let mut data: [MaybeUninit<Value>; 1024] = unsafe { MaybeUninit::uninit().assume_init() };
+
+        // Dropping a `MaybeUninit` does nothing. Thus using raw pointer
+        // assignment instead of `ptr::write` does not cause the old
+        // uninitialized value to be dropped. Also if there is a panic during
+        // this loop, we have a memory leak, but there is no memory safety
+        // issue.
+        for elem in &mut data[..] {
+            elem.write(Value::default());
+        }
+
+        // Everything is initialized. Transmute the array to the
+        // initialized type.
+        unsafe { mem::transmute::<_, [Value; 1024]>(data) }
+    };
+    data
+}
+
 impl<'a> VirtualMachine<'a> {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
@@ -60,32 +100,13 @@ impl<'a> VirtualMachine<'a> {
     }
 
     pub fn new_with_writer(custom_writer: Writer<'a>) -> Self {
-        let data = {
-            // Create an uninitialized array of `MaybeUninit`. The `assume_init` is
-            // safe because the type we are claiming to have initialized here is a
-            // bunch of `MaybeUninit`s, which do not require initialization.
-            let mut data: [MaybeUninit<Value>; 1024] =
-                unsafe { MaybeUninit::uninit().assume_init() };
-
-            // Dropping a `MaybeUninit` does nothing. Thus using raw pointer
-            // assignment instead of `ptr::write` does not cause the old
-            // uninitialized value to be dropped. Also if there is a panic during
-            // this loop, we have a memory leak, but there is no memory safety
-            // issue.
-            for elem in &mut data[..] {
-                elem.write(Value::default());
-            }
-
-            // Everything is initialized. Transmute the array to the
-            // initialized type.
-            unsafe { mem::transmute::<_, [Value; 1024]>(data) }
-        };
         VirtualMachine {
-            stack: data,
+            stack: init_stack(),
             stack_top: 0,
             call_frames: Vec::new(),
             runtime_values: Values::new(),
             up_values: LinkedList::new(),
+            // up_values_in_stack: LinkedList::new(),
             custom_writer,
         }
     }
@@ -208,16 +229,18 @@ impl<'a> VirtualMachine<'a> {
     }
 
     fn closure_from_stack_mut(&mut self, index: usize) -> &mut Closure {
-        match &mut self.stack[index] {
+        let v = &mut self.stack[index];
+        match v {
             Value::Object(Object::Closure(c)) => c,
-            _ => panic!("unreachable"),
+            _ => panic!("Expected closure at stack index: {} but got ({})", index, v),
         }
     }
 
     fn closure_from_stack(&self, index: usize) -> &Closure {
+        let v = &self.stack[index];
         match &self.stack[index] {
             Value::Object(Object::Closure(c)) => c,
-            _ => panic!("unreachable"),
+            _ => panic!("Expected closure at stack index: {} but got ({})", index, v),
         }
     }
 
@@ -241,6 +264,11 @@ impl<'a> VirtualMachine<'a> {
                 let ip = self.ip();
                 self.current_chunk()
                     .disassemble_instruction_with_writer(ip, &mut buf);
+                trace!(
+                    "IP: {} Current Stack: {:?}",
+                    self.ip(),
+                    self.sanitized_stack(0..self.stack_top, false)
+                );
             }
             let byte = self.read_byte();
             let instruction: Opcode = Opcode::try_from(byte).map_err(|e| {
@@ -252,14 +280,9 @@ impl<'a> VirtualMachine<'a> {
                 ))
             })?;
             if log_enabled!(Level::Trace) {
-                trace!(
-                    "Current Stack: {:?}",
-                    self.sanitized_stack(0..self.stack_top, false)
-                );
                 let fun_name = (*self.current_function()).to_string();
                 trace!(
-                    "IP: {}, In function {} Next Instruction: [{}]",
-                    self.ip(),
+                    "In function {} Next Instruction: [{}]",
                     fun_name,
                     utf8_to_string(&buf).trim()
                 );
@@ -273,12 +296,12 @@ impl<'a> VirtualMachine<'a> {
                     trace!("Call frame count: {}", self.call_frames.len());
                     let fn_starting_pointer = self.call_frame().fn_start_stack_index;
                     let result = self.pop();
+                    // self.close_upvalues_(fn_starting_pointer);
                     self.close_upvalues(fn_starting_pointer);
                     if self.call_frames.len() == 1 {
                         return Ok(());
                     }
                     let _frame = self.call_frames.pop().expect("expect frame");
-                    // self.set_ip(frame.ip);
                     // drop all the local values for the last function
                     self.stack_top = fn_starting_pointer;
                     // push the return result
@@ -392,7 +415,7 @@ impl<'a> VirtualMachine<'a> {
                 }
                 Opcode::Closure => {
                     let function = self.read_function()?;
-                    let fn_start_stack_ptr = self.call_frame().fn_start_stack_index;
+                    let current_fn_stack_ptr = self.call_frame().fn_start_stack_index;
                     let mut closure = Closure::new(function.clone());
                     match &*function {
                         Function::UserDefined(u) => {
@@ -400,9 +423,11 @@ impl<'a> VirtualMachine<'a> {
                                 let is_local = self.read_byte();
                                 let index = self.read_byte();
                                 if is_local > 0 {
-                                    let local: *mut Value =
-                                        &mut self.stack[fn_start_stack_ptr + index as usize];
-                                    let captured_upvalue = self.capture_upvalue(local);
+                                    let upvalue_index_on_stack =
+                                        current_fn_stack_ptr + index as usize;
+                                    let captured_upvalue =
+                                    // self.capture_upvalue_(upvalue_index_on_stack);
+                                    self.capture_upvalue(upvalue_index_on_stack);
                                     closure.upvalues.push(captured_upvalue);
                                 } else {
                                     let current_closure = self.current_closure();
@@ -417,27 +442,36 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::GetUpvalue => {
                     let slot = self.read_byte();
                     let closure = self.current_closure();
-                    let upvalue = (&*closure.upvalues[slot as usize]).borrow();
-                    let location = upvalue.location;
-                    drop(upvalue);
-                    unsafe {
-                        let value = (&*location).clone();
-                        self.push(value);
-                    }
+                    let value = {
+                        let upvalue = (&*closure.upvalues[slot as usize]).borrow();
+                        match &upvalue.location {
+                            Location::Stack(index) => self.stack[*index].clone(),
+                            Location::Heap(shared_value) => shared_value.clone(),
+                        }
+                    };
+                    self.push(value);
                 }
                 Opcode::SetUpvalue => {
                     let slot = self.read_byte();
                     let value = self.peek_at(slot as usize).clone();
                     let closure = self.current_closure_mut();
                     let upvalue = &closure.upvalues[slot as usize];
-                    let upvalue = (&**upvalue).borrow();
-                    let location = upvalue.location;
-                    drop(upvalue);
-                    unsafe {
-                        *location = value;
+                    let mut upvalue = (&**upvalue).borrow_mut();
+                    let location = &mut upvalue.location;
+                    match location {
+                        Location::Stack(index) => {
+                            let i = *index;
+                            drop(upvalue);
+                            self.stack[i] = value
+                        }
+                        Location::Heap(shared_value) => {
+                            let sv = &mut *shared_value;
+                            *sv = value;
+                        }
                     }
                 }
                 Opcode::CloseUpvalue => {
+                    // self.close_upvalues_(self.stack_top - 1);
                     self.close_upvalues(self.stack_top - 1);
                     self.pop();
                 }
@@ -459,42 +493,76 @@ impl<'a> VirtualMachine<'a> {
             .collect();
         s
     }
-    fn close_upvalues(&mut self, top: usize) {
-        let last: *mut Value = &mut self.stack[top];
-        let upvalue_iter = self.up_values.iter_mut().rev();
+
+    fn close_upvalues(&mut self, last_index: usize) {
+        let upvalue_iter = self.up_values.iter().rev();
         let mut count = 0;
         upvalue_iter
             .map(|u| (**u).borrow_mut())
-            .take_while(|u| u.location >= last)
-            .for_each(|mut u| unsafe {
+            .take_while(|u| match &u.location {
+                Location::Stack(index) => *index >= last_index,
+                _ => false,
+            })
+            .for_each(|mut u| {
                 count += 1;
-                let value = (*u.location).clone();
-                u.closed = Some(value);
-                let location: *mut Value = u.closed.as_mut().expect("expect mut ref");
-                u.location = location;
+                if let Location::Stack(index) = u.location {
+                    let value = self.stack[index].clone();
+                    u.location = Location::Heap(value);
+                }
             });
         let _captured_values = self.up_values.split_off(self.up_values.len() - count);
     }
 
-    fn capture_upvalue(&mut self, value: *mut Value) -> Shared<Upvalue> {
+    fn capture_upvalue(&mut self, stack_index: usize) -> Shared<Upvalue> {
         let upvalue_iter = self.up_values.iter().rev();
         let upvalue = upvalue_iter
             .take_while(|u| {
-                let upvalue = (**u).borrow_mut();
-                upvalue.location >= value
+                let u = (**u).borrow();
+                match &u.location {
+                    Location::Stack(index) => *index >= stack_index,
+                    _ => false,
+                }
             })
             .find(|u| {
-                let upvalue = (**u).borrow_mut();
-                upvalue.location == value
+                let u = (**u).borrow();
+                match &u.location {
+                    Location::Stack(index) => *index == stack_index,
+                    _ => false,
+                }
             });
         if let Some(u) = upvalue {
             u.clone()
         } else {
-            let created_value = shared(Upvalue::new(value));
+            let created_value = shared(Upvalue::new_with_location(Location::Stack(stack_index)));
             self.up_values.push_back(created_value.clone());
             created_value
         }
     }
+
+    // fn capture_upvalue_(&mut self, stack_index: usize) -> Shared<Upvalue> {
+    //     let local: *mut Value = &mut self.stack[stack_index];
+    //     let upvalue_iter = self.up_values_in_stack.iter().rev();
+    //     let mut existing_upvalue_index = None;
+    //     for upvalue_in_stack in upvalue_iter {
+    //         let e = upvalue_in_stack.stack_index;
+    //         match e.cmp(&stack_index) {
+    //             std::cmp::Ordering::Less => break,
+    //             std::cmp::Ordering::Equal => {
+    //                 existing_upvalue_index = Some(e);
+    //                 break;
+    //             }
+    //             std::cmp::Ordering::Greater => continue,
+    //         }
+    //     }
+    //     if let Some(v) = existing_upvalue_index {
+    //         shared(Upvalue::new_with_location(Location::Stack(v)))
+    //     } else {
+    //         let created_value = shared(Upvalue::new_with_location(Location::Stack(stack_index)));
+    //         self.up_values_in_stack
+    //             .push_back(UpvalueInStack::new(stack_index, created_value.clone()));
+    //         created_value
+    //     }
+    // }
 
     fn call_value(&mut self, arg_count: u8) -> Result<()> {
         let closure_stack_index = self.stack_top - 1 - arg_count as usize;

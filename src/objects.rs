@@ -60,16 +60,18 @@ impl Display for Closure {
 
 #[derive(Debug, Clone)]
 pub struct Upvalue {
-    pub location: *mut Value,
-    pub closed: Option<Value>,
+    pub location: Location,
+}
+
+#[derive(Debug, Clone)]
+pub enum Location {
+    Stack(usize),
+    Heap(Value),
 }
 
 impl Upvalue {
-    pub fn new(value: *mut Value) -> Self {
-        Upvalue {
-            location: value,
-            closed: None,
-        }
+    pub fn new_with_location(location: Location) -> Self {
+        Upvalue { location }
     }
 }
 
