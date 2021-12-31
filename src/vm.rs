@@ -127,7 +127,7 @@ impl<'a> VirtualMachine<'a> {
         self.push(Value::Object(Object::Closure(Closure::new(
             main_function.clone(),
         ))));
-        self.call(main_function, 0)?;
+        self.check_arguments(main_function, 0)?;
         self.call_frames.push(CallFrame::new(0, 0));
         let start_time = Instant::now();
         let result = self.run();
@@ -228,6 +228,7 @@ impl<'a> VirtualMachine<'a> {
         self.closure_from_stack(index)
     }
 
+    #[inline]
     fn closure_from_stack_mut(&mut self, index: usize) -> &mut Closure {
         let v = &mut self.stack[index];
         match v {
@@ -236,6 +237,7 @@ impl<'a> VirtualMachine<'a> {
         }
     }
 
+    #[inline]
     fn closure_from_stack(&self, index: usize) -> &Closure {
         let v = &self.stack[index];
         match &self.stack[index] {
@@ -296,7 +298,6 @@ impl<'a> VirtualMachine<'a> {
                     trace!("Call frame count: {}", self.call_frames.len());
                     let fn_starting_pointer = self.call_frame().fn_start_stack_index;
                     let result = self.pop();
-                    // self.close_upvalues_(fn_starting_pointer);
                     self.close_upvalues(fn_starting_pointer);
                     if self.call_frames.len() == 1 {
                         return Ok(());
@@ -411,7 +412,7 @@ impl<'a> VirtualMachine<'a> {
                 }
                 Opcode::Call => {
                     let arg_count = self.read_byte();
-                    self.call_value(arg_count)?;
+                    self.call(arg_count)?;
                 }
                 Opcode::Closure => {
                     let function = self.read_function()?;
@@ -426,8 +427,7 @@ impl<'a> VirtualMachine<'a> {
                                     let upvalue_index_on_stack =
                                         current_fn_stack_ptr + index as usize;
                                     let captured_upvalue =
-                                    // self.capture_upvalue_(upvalue_index_on_stack);
-                                    self.capture_upvalue(upvalue_index_on_stack);
+                                        self.capture_upvalue(upvalue_index_on_stack);
                                     closure.upvalues.push(captured_upvalue);
                                 } else {
                                     let current_closure = self.current_closure();
@@ -471,7 +471,6 @@ impl<'a> VirtualMachine<'a> {
                     }
                 }
                 Opcode::CloseUpvalue => {
-                    // self.close_upvalues_(self.stack_top - 1);
                     self.close_upvalues(self.stack_top - 1);
                     self.pop();
                 }
@@ -538,33 +537,7 @@ impl<'a> VirtualMachine<'a> {
             created_value
         }
     }
-
-    // fn capture_upvalue_(&mut self, stack_index: usize) -> Shared<Upvalue> {
-    //     let local: *mut Value = &mut self.stack[stack_index];
-    //     let upvalue_iter = self.up_values_in_stack.iter().rev();
-    //     let mut existing_upvalue_index = None;
-    //     for upvalue_in_stack in upvalue_iter {
-    //         let e = upvalue_in_stack.stack_index;
-    //         match e.cmp(&stack_index) {
-    //             std::cmp::Ordering::Less => break,
-    //             std::cmp::Ordering::Equal => {
-    //                 existing_upvalue_index = Some(e);
-    //                 break;
-    //             }
-    //             std::cmp::Ordering::Greater => continue,
-    //         }
-    //     }
-    //     if let Some(v) = existing_upvalue_index {
-    //         shared(Upvalue::new_with_location(Location::Stack(v)))
-    //     } else {
-    //         let created_value = shared(Upvalue::new_with_location(Location::Stack(stack_index)));
-    //         self.up_values_in_stack
-    //             .push_back(UpvalueInStack::new(stack_index, created_value.clone()));
-    //         created_value
-    //     }
-    // }
-
-    fn call_value(&mut self, arg_count: u8) -> Result<()> {
+    fn call(&mut self, arg_count: u8) -> Result<()> {
         let closure_stack_index = self.stack_top - 1 - arg_count as usize;
         let v = self.peek_at(arg_count as usize);
         match &*v {
@@ -572,15 +545,15 @@ impl<'a> VirtualMachine<'a> {
                 let closure = c.clone();
                 let fn_start_stack_ptr = self.stack_top - arg_count as usize - 1;
                 let frame = CallFrame::new(fn_start_stack_ptr, closure_stack_index);
-                self.call(closure.function, arg_count as usize)?;
+                self.check_arguments(closure.function, arg_count as usize)?;
                 self.call_frames.push(frame);
                 Ok(())
             }
             _ => bail!(self.runtime_error("Not a function/closure")),
         }
     }
-
-    fn call(&mut self, closure: Rc<Function>, arg_count: usize) -> Result<bool> {
+    #[inline]
+    fn check_arguments(&mut self, closure: Rc<Function>, arg_count: usize) -> Result<bool> {
         let function = &*closure;
         match function {
             Function::UserDefined(u) => {
@@ -596,6 +569,7 @@ impl<'a> VirtualMachine<'a> {
         Ok(true)
     }
 
+    #[inline]
     fn read_string(&self) -> Result<&str> {
         let constant = self.read_constant_at(self.ip());
         match constant {
@@ -604,6 +578,7 @@ impl<'a> VirtualMachine<'a> {
         }
     }
 
+    #[inline]
     fn read_function(&mut self) -> Result<Rc<Function>> {
         let constant = self.read_constant();
         match constant {
@@ -632,17 +607,20 @@ impl<'a> VirtualMachine<'a> {
         runtime_vm_error(line, &utf8_to_string(&error_buf))
     }
 
+    #[inline]
     fn peek_at(&self, distance: usize) -> &Value {
         let top = self.stack_top;
         &self.stack[top - 1 - distance]
     }
 
+    #[inline]
     fn equals(&mut self) -> Result<bool> {
         let left = self.pop();
         let right = self.pop();
         value_equals(left, right)
     }
 
+    #[inline]
     fn binary_op(&mut self, op: fn(f64, f64) -> Value) -> Result<()> {
         let (left, right) = (self.peek_at(1), self.peek_at(0));
         let (left, right) = match (left, right) {
@@ -651,6 +629,7 @@ impl<'a> VirtualMachine<'a> {
         };
         self.binary_op_with_num(left, right, op)
     }
+
     fn add(&mut self) -> Result<()> {
         match (self.peek_at(1), self.peek_at(0)) {
             (Value::Object(Object::String(left)), Value::Object(Object::String(right))) => {
@@ -671,6 +650,7 @@ impl<'a> VirtualMachine<'a> {
         }
     }
 
+    #[inline]
     fn binary_op_with_num(
         &mut self,
         left: f64,
