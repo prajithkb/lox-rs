@@ -15,7 +15,10 @@ use crate::compiler::Compiler;
 use crate::errors::*;
 use crate::instructions::{print_value, Opcode};
 use crate::lox::{utf8_to_string, Shared, Writer};
-use crate::objects::{shared, Closure, Function, Location, Object, Upvalue, Value, Values};
+use crate::objects::{
+    shared, BoundMethod, Class, Closure, Function, Instance, Location, Object, Upvalue, Value,
+    Values,
+};
 use crate::scanner::Scanner;
 use crate::tokens::pretty_print;
 
@@ -23,33 +26,16 @@ use crate::tokens::pretty_print;
 struct CallFrame {
     fn_start_stack_index: usize,
     ip: usize,
-    closure_stack_index: usize,
 }
 
 impl CallFrame {
-    fn new(fn_start_stack_index: usize, closure_stack_index: usize) -> Self {
+    fn new(fn_start_stack_index: usize) -> Self {
         CallFrame {
             fn_start_stack_index,
             ip: 0,
-            closure_stack_index,
         }
     }
 }
-
-// #[derive(Clone)]
-// struct UpvalueInStack {
-//     stack_index: usize,
-//     upvalue: Shared<Upvalue>,
-// }
-
-// impl UpvalueInStack {
-//     fn new(stack_index: usize, upvalue: Shared<Upvalue>) -> Self {
-//         UpvalueInStack {
-//             stack_index,
-//             upvalue,
-//         }
-//     }
-// }
 
 pub struct VirtualMachine<'a> {
     stack: [Value; 1024],
@@ -57,7 +43,6 @@ pub struct VirtualMachine<'a> {
     call_frames: Vec<CallFrame>,
     runtime_values: Values,
     up_values: LinkedList<Shared<Upvalue>>,
-    // up_values_in_stack: LinkedList<UpvalueInStack>,
     custom_writer: Writer<'a>,
 }
 
@@ -124,11 +109,9 @@ impl<'a> VirtualMachine<'a> {
         let compiler = Compiler::new(tokens);
         let main_function = Rc::new(compiler.compile()?);
         info!("Compiled in {} us", start_time.elapsed().as_micros());
-        self.push(Value::Object(Object::Closure(Closure::new(
-            main_function.clone(),
-        ))));
-        self.check_arguments(main_function, 0)?;
-        self.call_frames.push(CallFrame::new(0, 0));
+        self.check_arguments(&main_function, 0)?;
+        self.push(Value::Object(Object::Closure(Closure::new(main_function))));
+        self.call_frames.push(CallFrame::new(0));
         let start_time = Instant::now();
         let result = self.run();
         info!("Ran in {} us", start_time.elapsed().as_micros());
@@ -218,23 +201,9 @@ impl<'a> VirtualMachine<'a> {
     }
 
     #[inline]
-    fn current_closure_mut(&mut self) -> &mut Closure {
-        let index = self.call_frame().closure_stack_index;
-        self.closure_from_stack_mut(index)
-    }
-    #[inline]
     fn current_closure(&self) -> &Closure {
-        let index = self.call_frame().closure_stack_index;
+        let index = self.call_frame().fn_start_stack_index;
         self.closure_from_stack(index)
-    }
-
-    #[inline]
-    fn closure_from_stack_mut(&mut self, index: usize) -> &mut Closure {
-        let v = &mut self.stack[index];
-        match v {
-            Value::Object(Object::Closure(c)) => c,
-            _ => panic!("Expected closure at stack index: {} but got ({})", index, v),
-        }
     }
 
     #[inline]
@@ -242,7 +211,23 @@ impl<'a> VirtualMachine<'a> {
         let v = &self.stack[index];
         match &self.stack[index] {
             Value::Object(Object::Closure(c)) => c,
-            _ => panic!("Expected closure at stack index: {} but got ({})", index, v),
+            Value::Object(Object::BoundMethod(BoundMethod {
+                receiver: _,
+                closure,
+            })) => closure,
+            Value::Object(Object::Receiver(_, closure)) => closure,
+            _ => {
+                if log::log_enabled!(Level::Trace) {
+                    trace!(
+                        "Stack at error [{:?}]",
+                        self.sanitized_stack(0..self.stack_top, false),
+                    );
+                }
+                panic!(
+                    "VM BUG: Expected closure at stack index: {} but got ({})",
+                    index, v,
+                )
+            }
         }
     }
 
@@ -263,14 +248,14 @@ impl<'a> VirtualMachine<'a> {
         loop {
             let mut buf = vec![];
             if log_enabled!(Level::Trace) {
-                let ip = self.ip();
-                self.current_chunk()
-                    .disassemble_instruction_with_writer(ip, &mut buf);
                 trace!(
                     "IP: {} Current Stack: {:?}",
                     self.ip(),
                     self.sanitized_stack(0..self.stack_top, false)
                 );
+                let ip = self.ip();
+                self.current_chunk()
+                    .disassemble_instruction_with_writer(ip, &mut buf);
             }
             let byte = self.read_byte();
             let instruction: Opcode = Opcode::try_from(byte).map_err(|e| {
@@ -349,12 +334,11 @@ impl<'a> VirtualMachine<'a> {
                 }
                 Opcode::DefineGlobal => {
                     let value = self.pop();
-                    let name = self.read_string()?.to_string();
-                    self.increment_ip_by(1);
+                    let name = self.read_string()?;
                     self.runtime_values.insert(name, value);
                 }
                 Opcode::GetGlobal => {
-                    let name = self.read_string()?;
+                    let name = self.read_str_without_increment()?;
                     let value = self.runtime_values.get(name);
                     if let Some(v) = value {
                         let v = v.clone();
@@ -365,8 +349,7 @@ impl<'a> VirtualMachine<'a> {
                     self.increment_ip_by(1);
                 }
                 Opcode::SetGlobal => {
-                    let name = self.read_string()?.to_string();
-                    self.increment_ip_by(1);
+                    let name = self.read_string()?;
                     let value = self.peek_at(0).clone();
                     let v = self.runtime_values.get_mut(&name);
                     match v {
@@ -454,7 +437,7 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::SetUpvalue => {
                     let slot = self.read_byte();
                     let value = self.peek_at(slot as usize).clone();
-                    let closure = self.current_closure_mut();
+                    let closure = self.current_closure();
                     let upvalue = &closure.upvalues[slot as usize];
                     let mut upvalue = (&**upvalue).borrow_mut();
                     let location = &mut upvalue.location;
@@ -474,8 +457,106 @@ impl<'a> VirtualMachine<'a> {
                     self.close_upvalues(self.stack_top - 1);
                     self.pop();
                 }
+                Opcode::Class => {
+                    let class = self.read_string()?;
+                    self.push(Value::Object(Object::Class(Rc::new(Class::new(class)))))
+                }
+                Opcode::SetProperty => {
+                    let property = self.read_string()?;
+                    let value = self.peek_at(0).clone();
+                    let instance = self.peek_at(1);
+                    self.set_property(instance, property, value)?;
+                    let value = self.pop();
+                    self.pop();
+                    self.push(value);
+                }
+                Opcode::GetProperty => {
+                    let instance = self.peek_at(0);
+                    let property = self.read_str_without_increment()?;
+                    let (value, class) = self.get_property(instance, property)?;
+                    if let Some(class) = class {
+                        let method = self.get_method(class, property)?;
+                        self.bind_method(value, method);
+                    } else {
+                        self.pop(); // instance
+                        self.push(value);
+                    }
+                    self.increment_ip_by(1);
+                }
+                Opcode::Method => {
+                    let method_name = self.read_string()?;
+                    self.define_method(method_name)?;
+                }
             };
         }
+    }
+
+    fn set_property(&self, instance: &Value, property: String, value: Value) -> Result<()> {
+        match instance {
+            Value::Object(Object::Instance(instance)) => {
+                let mut fields_mut = (*instance.fields).borrow_mut();
+                fields_mut.insert(property, value);
+            }
+            Value::Object(Object::Receiver(instance, _)) => {
+                let instance = &**instance;
+                self.set_property(instance, property, value)?;
+            }
+            _ => bail!(self.runtime_error("Only instances have properties")),
+        }
+        Ok(())
+    }
+
+    fn get_property(&self, instance: &Value, property: &str) -> Result<(Value, Option<Rc<Class>>)> {
+        match instance {
+            Value::Object(Object::Instance(instance)) => {
+                let fields = (*instance.fields).borrow();
+                if let Some(v) = fields.get(property) {
+                    let v = v.clone();
+                    drop(fields);
+                    Ok((v, None))
+                    // self.pop(); // instance
+                    // self.push(v);
+                } else {
+                    drop(fields);
+                    let class = instance.class.clone();
+                    let receiver = self.peek_at(0).clone(); // receiver
+                    Ok((receiver, Some(class)))
+                    // self.bind_method(receiver, method);
+                }
+            }
+            Value::Object(Object::Receiver(instance, _)) => self.get_property(instance, property),
+            _ => bail!(self.runtime_error("Only instances have properties (to call '.' operator)")),
+        }
+    }
+
+    fn get_method(&self, class: Rc<Class>, name: &str) -> Result<Rc<Closure>> {
+        let method = (*class.methods).borrow();
+        if let Some(c) = method.get(name) {
+            Ok(c.clone())
+        } else {
+            bail!(self.runtime_error(&format!("Undefined property {}", name)))
+        }
+    }
+
+    fn bind_method(&mut self, receiver: Value, method: Rc<Closure>) {
+        let bound_method = BoundMethod::new(Rc::new(receiver), method);
+        self.push(Value::Object(Object::BoundMethod(bound_method)));
+    }
+
+    fn define_method(&mut self, method_name: String) -> Result<()> {
+        let method = self.peek_at(0).clone();
+        match method {
+            Value::Object(Object::Closure(closure)) => match self.peek_at(1) {
+                Value::Object(Object::Class(class)) => {
+                    let mut methods = (*class.methods).borrow_mut();
+                    methods.insert(method_name, Rc::new(closure));
+                }
+                _ => bail!(self.runtime_error("VM BUG: Unreachable code")),
+            },
+            _ => bail!(self.runtime_error("VM BUG: Unreachable code")),
+        };
+        self.pop(); //method closure
+        Ok(())
     }
 
     fn sanitized_stack(&self, range: Range<usize>, with_address: bool) -> Vec<String> {
@@ -516,14 +597,14 @@ impl<'a> VirtualMachine<'a> {
         let upvalue_iter = self.up_values.iter().rev();
         let upvalue = upvalue_iter
             .take_while(|u| {
-                let u = (**u).borrow();
+                let u = (***u).borrow();
                 match &u.location {
                     Location::Stack(index) => *index >= stack_index,
                     _ => false,
                 }
             })
             .find(|u| {
-                let u = (**u).borrow();
+                let u = (***u).borrow();
                 match &u.location {
                     Location::Stack(index) => *index == stack_index,
                     _ => false,
@@ -537,24 +618,54 @@ impl<'a> VirtualMachine<'a> {
             created_value
         }
     }
+
     fn call(&mut self, arg_count: u8) -> Result<()> {
-        let closure_stack_index = self.stack_top - 1 - arg_count as usize;
-        let v = self.peek_at(arg_count as usize);
-        match &*v {
+        let arg_count = arg_count as usize;
+        let value = self.peek_at(arg_count as usize);
+        let start_index = self.stack_top - 1 - arg_count;
+        match value {
             Value::Object(Object::Closure(c)) => {
-                let closure = c.clone();
-                let fn_start_stack_ptr = self.stack_top - arg_count as usize - 1;
-                let frame = CallFrame::new(fn_start_stack_ptr, closure_stack_index);
-                self.check_arguments(closure.function, arg_count as usize)?;
-                self.call_frames.push(frame);
+                let function = c.function.clone();
+                self.call_function(&function, arg_count, start_index)
+            }
+            Value::Object(Object::Class(c)) => {
+                let class = c.clone();
+                let methods = c.methods.clone();
+                let receiver = Value::Object(Object::Instance(Instance::new(class)));
+                if let Some(initializer) = (*methods).borrow().get("init") {
+                    self.stack[start_index] =
+                        Value::Object(Object::Receiver(Rc::new(receiver), initializer.clone()));
+                    self.call_function(&initializer.function, arg_count, start_index)?;
+                } else {
+                    self.stack[start_index] = receiver;
+                }
                 Ok(())
             }
-            _ => bail!(self.runtime_error("Not a function/closure")),
+            Value::Object(Object::BoundMethod(bound_method)) => {
+                let closure = bound_method.closure.clone();
+                let receiver = bound_method.receiver.clone();
+                self.stack[start_index] =
+                    Value::Object(Object::Receiver(receiver, closure.clone()));
+                self.call_function(&closure.function, arg_count, start_index)
+            }
+            _ => bail!(self
+                .runtime_error("can only call a function/closure, constructor or a class method")),
         }
     }
+
+    fn call_function(
+        &mut self,
+        function: &Function,
+        arg_count: usize,
+        fn_start_stack_index: usize,
+    ) -> Result<()> {
+        let frame = CallFrame::new(fn_start_stack_index);
+        self.check_arguments(function, arg_count)?;
+        self.call_frames.push(frame);
+        Ok(())
+    }
     #[inline]
-    fn check_arguments(&mut self, closure: Rc<Function>, arg_count: usize) -> Result<bool> {
-        let function = &*closure;
+    fn check_arguments(&mut self, function: &Function, arg_count: usize) -> Result<bool> {
         match function {
             Function::UserDefined(u) => {
                 let arity = u.arity;
@@ -570,7 +681,7 @@ impl<'a> VirtualMachine<'a> {
     }
 
     #[inline]
-    fn read_string(&self) -> Result<&str> {
+    fn read_str_without_increment(&self) -> Result<&str> {
         let constant = self.read_constant_at(self.ip());
         match constant {
             Value::Object(Object::String(s)) => Ok(s),
@@ -579,11 +690,18 @@ impl<'a> VirtualMachine<'a> {
     }
 
     #[inline]
+    fn read_string(&mut self) -> Result<String> {
+        let result = self.read_str_without_increment()?.to_string();
+        self.increment_ip_by(1);
+        Ok(result)
+    }
+
+    #[inline]
     fn read_function(&mut self) -> Result<Rc<Function>> {
         let constant = self.read_constant();
         match constant {
             Value::Object(Object::Function(s)) => Ok(s),
-            _ => bail!(self.runtime_error("Not a Closure")),
+            _ => bail!(self.runtime_error("Not a function")),
         }
     }
 
@@ -591,7 +709,7 @@ impl<'a> VirtualMachine<'a> {
         let mut error_buf = vec![];
         writeln!(error_buf, "{}", message).expect("Write failed");
         for frame in (&self.call_frames).iter().rev() {
-            let stack_index = frame.closure_stack_index;
+            let stack_index = frame.fn_start_stack_index;
             let function = &*self.closure_from_stack(stack_index).function;
             let fun_name = &function.to_string();
             match &*function {
@@ -1024,6 +1142,135 @@ mod tests {
         "#;
         vm.interpret(source.to_string())?;
         assert_eq!("updated\n", utf8_to_string(&buf));
+        Ok(())
+    }
+
+    #[test]
+    fn vm_class_fields() -> Result<()> {
+        let mut buf = vec![];
+        let mut vm = VirtualMachine::new_with_writer(Some(&mut buf));
+        let source = r#"
+        class Pair {}
+
+        var pair = Pair();
+        pair.first = 1;
+        pair.second = 2;
+        print pair.first + pair.second; // 3.
+
+        "#;
+        vm.interpret(source.to_string())?;
+        assert_eq!("3\n", utf8_to_string(&buf));
+        Ok(())
+    }
+
+    #[test]
+    fn vm_class_methods() -> Result<()> {
+        let mut buf = vec![];
+        let mut vm = VirtualMachine::new_with_writer(Some(&mut buf));
+        let source = r#"
+        class Scone {
+            topping(first, second) {
+              print "scone with " + first + " and " + second;
+            }
+          }
+          
+          var scone = Scone();
+          scone.topping("berries", "cream");
+
+        "#;
+        vm.interpret(source.to_string())?;
+        assert_eq!("scone with berries and cream\n", utf8_to_string(&buf));
+        Ok(())
+    }
+
+    #[test]
+    fn vm_class_initializer_and_this() -> Result<()> {
+        let mut buf = vec![];
+        let mut vm = VirtualMachine::new_with_writer(Some(&mut buf));
+        let source = r#"
+        class Brunch {
+            init(food, drinks) {
+                this.food = food;
+                this.drinks = drinks;
+            }
+        }
+                  
+        var brunch = Brunch("eggs", "coffee");
+        
+        print brunch.food + " and " + brunch.drinks;
+
+        "#;
+        vm.interpret(source.to_string())?;
+        assert_eq!("eggs and coffee\n", utf8_to_string(&buf));
+
+        let mut buf = vec![];
+        let mut vm = VirtualMachine::new_with_writer(Some(&mut buf));
+        let source = r#"
+        class Brunch {
+            init(food, drinks) {
+                this.food = food;
+                this.drinks = drinks;
+            }
+
+            dessert(item) {
+                this.dessert = item;
+                return this;
+            }
+        }
+                  
+        var brunch = Brunch("eggs", "coffee");
+
+        var brunch_with_dessert = brunch.dessert("cake");
+        
+        print brunch_with_dessert.food + " and " + brunch_with_dessert.drinks + " with " + brunch_with_dessert.dessert + " as dessert";
+
+        "#;
+        vm.interpret(source.to_string())?;
+        assert_eq!(
+            "eggs and coffee with cake as dessert\n",
+            utf8_to_string(&buf)
+        );
+
+        let mut buf = vec![];
+        let mut vm = VirtualMachine::new_with_writer(Some(&mut buf));
+        let source = r#"
+        class Brunch {
+            init(food, drinks) {
+                this.food = food;
+                this.drinks = drinks;
+            }
+        }
+                  
+        var brunch = Brunch("eggs");
+        "#;
+        match vm.interpret(source.to_string()) {
+            Err(e) => {
+                print_error(e, &mut buf);
+                assert_eq!("[Runtime Error] Line: 9, message: Expected 2 arguments but got 1\n[line 9] in <fn script>\n\n", utf8_to_string(&buf))
+            }
+            Ok(_) => panic!("This test is expected to fail"),
+        }
+
+        let mut buf = vec![];
+        let mut vm = VirtualMachine::new_with_writer(Some(&mut buf));
+        let source = r#"
+        class Brunch {
+            init(food, drinks) {
+                this.food = food;
+                this.drinks = drinks;
+                return 2;
+            }
+        }
+                  
+        var brunch = Brunch("eggs");
+        "#;
+        match vm.interpret(source.to_string()) {
+            Err(e) => {
+                print_error(e, &mut buf);
+                assert_eq!("[Parse Error] [line: 6] Error at <2>: message: Can't return a value from an initializer\n", utf8_to_string(&buf))
+            }
+            Ok(_) => panic!("This test is expected to fail"),
+        }
         Ok(())
     }
 }

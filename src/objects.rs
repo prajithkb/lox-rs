@@ -33,7 +33,75 @@ impl Default for Value {
 pub enum Object {
     String(String),
     Function(Rc<Function>),
+    Class(Rc<Class>),
+    Instance(Instance),
     Closure(Closure),
+    BoundMethod(BoundMethod),
+    Receiver(Rc<Value>, Rc<Closure>),
+}
+
+#[derive(Debug, Clone)]
+pub struct BoundMethod {
+    pub receiver: Rc<Value>,
+    pub closure: Rc<Closure>,
+}
+
+impl BoundMethod {
+    pub fn new(receiver: Rc<Value>, closure: Rc<Closure>) -> Self {
+        BoundMethod { receiver, closure }
+    }
+}
+
+impl Display for BoundMethod {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&format!(
+            "<method {} for {}>",
+            self.closure.function.to_string(),
+            &self.receiver.to_string()
+        ))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Class {
+    pub name: String,
+    pub methods: Shared<HashMap<String, Rc<Closure>>>,
+}
+
+impl Class {
+    pub fn new(name: String) -> Self {
+        Class {
+            name,
+            methods: shared(HashMap::new()),
+        }
+    }
+}
+
+impl Display for Class {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&format!("<class {}>", &self.name))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Instance {
+    pub class: Rc<Class>,
+    pub fields: Shared<HashMap<String, Value>>,
+}
+
+impl Instance {
+    pub fn new(class: Rc<Class>) -> Self {
+        Instance {
+            class,
+            fields: shared(HashMap::new()),
+        }
+    }
+}
+
+impl Display for Instance {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&format!("<instance of {}>", &self.class.name))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -81,6 +149,12 @@ impl Display for Object {
             Object::String(s) => f.write_str(s),
             Object::Closure(c) => f.write_str(&c.to_string()),
             Object::Function(fun) => f.write_str(&fun.to_string()),
+            Object::Class(class) => f.write_str(&class.to_string()),
+            Object::Instance(instance) => f.write_str(&instance.to_string()),
+            Object::BoundMethod(bound_method) => f.write_str(&bound_method.to_string()),
+            Object::Receiver(value, method) => {
+                f.write_str(&format!("{} as receiver for {}", value, method))
+            }
         }
     }
 }

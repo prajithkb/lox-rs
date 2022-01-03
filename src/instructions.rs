@@ -43,6 +43,10 @@ pub enum Opcode {
     GetUpvalue,
     SetUpvalue,
     CloseUpvalue,
+    Class,
+    SetProperty,
+    GetProperty,
+    Method,
 }
 
 impl Display for Opcode {
@@ -187,6 +191,10 @@ pub fn disassemble_instruction(
             Opcode::SetUpvalue => byte_instruction(&instruction, chunk, offset, writer),
             Opcode::JumpIfFalse => jump_instruction(&instruction, chunk, 1, offset, writer),
             Opcode::JumpIfTrue => jump_instruction(&instruction, chunk, 1, offset, writer),
+            Opcode::Class => constant_instruction(&instruction, chunk, offset, writer),
+            Opcode::SetProperty => constant_instruction(&instruction, chunk, offset, writer),
+            Opcode::GetProperty => constant_instruction(&instruction, chunk, offset, writer),
+            Opcode::Method => constant_instruction(&instruction, chunk, offset, writer),
         },
         Err(e) => {
             eprintln!(

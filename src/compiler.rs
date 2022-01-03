@@ -93,6 +93,14 @@ impl Upvalue {
     }
 }
 
+struct ClassCompiler {}
+
+impl ClassCompiler {
+    pub fn new() -> Self {
+        ClassCompiler {}
+    }
+}
+
 #[derive(Debug)]
 struct Scope<'a> {
     locals: Vec<Local<'a>>,
@@ -128,10 +136,12 @@ impl<'a> Local<'a> {
         }
     }
 }
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone, Copy)]
 pub enum FunctionType {
     Script,
-    UserDefined,
+    Function,
+    Method,
+    Initializer,
 }
 
 #[derive(Debug)]
@@ -160,6 +170,8 @@ pub struct Compiler<'a> {
     states: LinkedList<State<'a>>,
     state: State<'a>,
     custom_writer: Writer<'a>,
+    current_class: Option<ClassCompiler>,
+    class_compilers: LinkedList<ClassCompiler>,
 }
 #[allow(dead_code)]
 impl<'a> Compiler<'a> {
@@ -187,6 +199,8 @@ impl<'a> Compiler<'a> {
             ),
             states: LinkedList::new(),
             custom_writer,
+            current_class: None,
+            class_compilers: LinkedList::new(),
         };
         c.current_scope_mut().locals.push(Local::new("", Some(0)));
         c.init_parse_rules();
@@ -205,7 +219,7 @@ impl<'a> Compiler<'a> {
             ParseRule::new(TokenType::LeftBrace, None, None, Precedence::None),
             ParseRule::new(TokenType::RightBrace, None, None, Precedence::None),
             ParseRule::new(TokenType::Comma, None, None, Precedence::None),
-            ParseRule::new(TokenType::Dot, None, None, Precedence::None),
+            ParseRule::new(TokenType::Dot, None, Some(Compiler::dot), Precedence::Call),
             ParseRule::new(
                 TokenType::Minus,
                 Some(Compiler::unary),
@@ -324,7 +338,12 @@ impl<'a> Compiler<'a> {
             ParseRule::new(TokenType::Print, None, None, Precedence::None),
             ParseRule::new(TokenType::Return, None, None, Precedence::None),
             ParseRule::new(TokenType::Super, None, None, Precedence::None),
-            ParseRule::new(TokenType::This, None, None, Precedence::None),
+            ParseRule::new(
+                TokenType::This,
+                Some(Compiler::this),
+                None,
+                Precedence::None,
+            ),
             ParseRule::new(
                 TokenType::True,
                 Some(Compiler::literal),
@@ -341,12 +360,14 @@ impl<'a> Compiler<'a> {
         while !self.is_at_end() {
             self.declaration()?;
         }
-        self.end_function();
+        self.emit_return_and_log();
         Ok(self.state.function)
     }
 
     fn declaration(&mut self) -> Result<()> {
-        if self.match_and_advance(&[TokenType::Fun]) {
+        if self.match_and_advance(&[TokenType::Class]) {
+            self.class_declaration()?;
+        } else if self.match_and_advance(&[TokenType::Fun]) {
             self.fun_declaration()?;
         } else if self.match_and_advance(&[TokenType::Var]) {
             self.var_declaration()?;
@@ -356,16 +377,61 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn start_new_function(&mut self, new_function_name: String) {
+    fn class_declaration(&mut self) -> Result<()> {
+        self.consume_next_token(TokenType::Identifier, "Expect class name")?;
+        let class_name = self.previous().clone();
+        let name_constant = self.identifier_constant(class_name.clone())?;
+        self.declare_local_variable()?;
+        self.emit_opcode_and_bytes(Opcode::Class, name_constant);
+        self.define_variable(name_constant);
+        if let Some(current_compiler) = self.current_class.take() {
+            self.class_compilers.push_back(current_compiler);
+        }
+        self.current_class = Some(ClassCompiler::new());
+        // this will bring the variable back on top of the stack
+        self.named_variable(class_name, false)?;
+        self.consume_next_token(TokenType::LeftBrace, "Expect '{' before class body")?;
+        while self.current().token_type != TokenType::RightBrace && !self.is_at_end() {
+            self.method()?;
+        }
+        self.consume_next_token(TokenType::RightBrace, "Expect '}' after class body")?;
+        self.emit_op_code(Opcode::Pop); // pop the class
+        let prev_class_compiler = self.class_compilers.pop_back();
+        self.current_class = prev_class_compiler;
+        Ok(())
+    }
+
+    fn method(&mut self) -> Result<()> {
+        self.consume_next_token(TokenType::Identifier, "Expect method name")?;
+        let method_name = self.previous().clone();
+        let mut function_type = FunctionType::Method;
+        if let Some(Literal::Identifier(s)) = &method_name.literal {
+            if s == "init" {
+                function_type = FunctionType::Initializer;
+            }
+        }
+        self.function(function_type)?;
+        let constant = self.identifier_constant(method_name)?;
+        self.emit_opcode_and_bytes(Opcode::Method, constant);
+        Ok(())
+    }
+
+    fn start_new_function(&mut self, function_type: FunctionType) -> Result<()> {
+        let new_function_name = self.function_name(function_type)?;
         let new_function =
             Function::UserDefined(UserDefinedFunction::new(0, Chunk::new(), new_function_name));
         let mut new_scope = Scope::new();
-        new_scope.locals.push(Local::new("", Some(0)));
+        if function_type != FunctionType::Function {
+            new_scope.locals.push(Local::new("this", Some(0)));
+        } else {
+            new_scope.locals.push(Local::new("", Some(0)));
+        }
         let current_state = std::mem::replace(
             &mut self.state,
-            State::new(new_function, new_scope, FunctionType::UserDefined),
+            State::new(new_function, new_scope, function_type),
         );
         self.states.push_back(current_state);
+        Ok(())
     }
 
     fn end_new_function(&mut self) -> State<'a> {
@@ -376,13 +442,13 @@ impl<'a> Compiler<'a> {
     fn fun_declaration(&mut self) -> Result<()> {
         let global = self.parse_variable("Expect function name")?;
         self.mark_initialized();
-        self.start_new_function(self.function_name(FunctionType::UserDefined)?);
-        self.function()?;
+        self.function(FunctionType::Function)?;
         self.define_variable(global);
         Ok(())
     }
 
-    fn function(&mut self) -> Result<()> {
+    fn function(&mut self, function_type: FunctionType) -> Result<()> {
+        self.start_new_function(function_type)?;
         self.begin_scope();
         self.consume_next_token(TokenType::LeftParen, "Expect '(' after function name")?;
         while self.current().token_type != TokenType::RightParen {
@@ -400,7 +466,7 @@ impl<'a> Compiler<'a> {
         self.consume_next_token(TokenType::RightParen, "Expect ')' after parameters")?;
         self.consume_next_token(TokenType::LeftBrace, "Expect '{' before function body")?;
         self.block()?;
-        self.end_function();
+        self.emit_return_and_log();
         let state = self.end_new_function();
         let up_values = &state.upvalues;
         let closure = Value::Object(Object::Function(Rc::new(state.function)));
@@ -416,17 +482,21 @@ impl<'a> Compiler<'a> {
     fn function_name(&self, t: FunctionType) -> Result<String> {
         match t {
             FunctionType::Script => Ok("".to_string()),
-            FunctionType::UserDefined => {
-                let token = self.previous();
-                let name = token
-                    .literal
-                    .as_ref()
-                    .expect("Expect function name literal");
-                match name {
-                    Literal::Identifier(s) => Ok(s.clone()),
-                    _ => bail!(parse_error(self.previous(), "Expect function name")),
-                }
-            }
+            FunctionType::Function => self.function_name_from_token(),
+            FunctionType::Method => self.function_name_from_token(),
+            FunctionType::Initializer => self.function_name_from_token(),
+        }
+    }
+
+    fn function_name_from_token(&self) -> Result<String> {
+        let token = self.previous();
+        let name = token
+            .literal
+            .as_ref()
+            .expect("Expect function name literal");
+        match name {
+            Literal::Identifier(s) => Ok(s.clone()),
+            _ => bail!(parse_error(self.previous(), "Expect function name")),
         }
     }
 
@@ -578,6 +648,12 @@ impl<'a> Compiler<'a> {
         if self.match_and_advance(&[TokenType::Semicolon]) {
             self.emit_return();
         } else {
+            if self.state.function_type == FunctionType::Initializer {
+                bail!(parse_error(
+                    self.current(),
+                    "Can't return a value from an initializer"
+                ))
+            }
             self.expression()?;
             self.consume_next_token(TokenType::Semicolon, "Expect ';' after return")?;
             self.emit_op_code(Opcode::Return);
@@ -798,6 +874,28 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
+    fn dot(&mut self, can_assign: bool) -> Result<()> {
+        self.consume_next_token(TokenType::Identifier, "Expect property name after '.'")?;
+        let name = self.identifier_constant(self.previous().clone())?;
+        if can_assign && self.match_and_advance(&[TokenType::Equal]) {
+            self.expression()?;
+            self.emit_opcode_and_bytes(Opcode::SetProperty, name);
+        } else {
+            self.emit_opcode_and_bytes(Opcode::GetProperty, name);
+        }
+        Ok(())
+    }
+
+    fn this(&mut self, _can_assign: bool) -> Result<()> {
+        if self.current_class.is_none() {
+            bail!(parse_error(
+                self.previous(),
+                "Can't use 'this' outside a class"
+            ));
+        }
+        self.variable_usage(false)
+    }
+
     fn argument_list(&mut self) -> Result<u8> {
         let mut count = 0;
         while self.current().token_type != TokenType::RightParen {
@@ -852,7 +950,7 @@ impl<'a> Compiler<'a> {
         self.current_chunk_mut().add_constant(value)
     }
 
-    fn end_function(&mut self) {
+    fn emit_return_and_log(&mut self) {
         self.emit_return();
         let name = &self.state.function.to_string();
         if self.custom_writer.is_some() {
@@ -869,7 +967,11 @@ impl<'a> Compiler<'a> {
 
     #[inline]
     fn emit_return(&mut self) {
-        self.emit_op_code(Opcode::Nil);
+        if self.state.function_type == FunctionType::Initializer {
+            self.emit_opcode_and_bytes(Opcode::GetLocal, 0);
+        } else {
+            self.emit_op_code(Opcode::Nil);
+        }
         self.emit_op_code(Opcode::Return);
     }
 
@@ -1517,7 +1619,6 @@ mod tests {
 
     #[test]
     fn closure() -> Result<()> {
-        // let _ = env_logger::builder().is_test(true).try_init();
         let source = r#"fun outer() {
             var a = 1;
             var b = 2;
@@ -1570,6 +1671,104 @@ mod tests {
 0002    | OpCode[DefineGlobal]              0 'outer'
 0004    | OpCode[Nil]
 0005    | OpCode[Return]
+"#,
+            utf8_to_string(&buf)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn classes_fields() -> Result<()> {
+        let source = r#"
+            class Pair {}
+            var pair = Pair();
+            pair.first = 1;
+            pair.second = 2;
+            print pair.first + pair.second; // 3.
+        "#;
+        let mut scanner = Scanner::new(source.to_string());
+        let tokens = scanner.scan_tokens()?;
+        let mut buf = vec![];
+        let compiler = Compiler::new_with_type_and_writer(tokens, Script, Some(&mut buf));
+        let _ = compiler.compile()?;
+        assert_eq!(
+            r#"== <fn script> ==
+0000 0002 OpCode[Class]                     0 'Pair'
+0002    | OpCode[DefineGlobal]              0 'Pair'
+0004    | OpCode[GetGlobal]                 1 'Pair'
+0006    | OpCode[Pop]
+0007 0003 OpCode[GetGlobal]                 3 'Pair'
+0009    | OpCode[Call]                      0
+0011    | OpCode[DefineGlobal]              2 'pair'
+0013 0004 OpCode[GetGlobal]                 4 'pair'
+0015    | OpCode[Constant]                  6 '1'
+0017    | OpCode[SetProperty]               5 'first'
+0019    | OpCode[Pop]
+0020 0005 OpCode[GetGlobal]                 7 'pair'
+0022    | OpCode[Constant]                  9 '2'
+0024    | OpCode[SetProperty]               8 'second'
+0026    | OpCode[Pop]
+0027 0006 OpCode[GetGlobal]                10 'pair'
+0029    | OpCode[GetProperty]              11 'first'
+0031    | OpCode[GetGlobal]                12 'pair'
+0033    | OpCode[GetProperty]              13 'second'
+0035    | OpCode[Add]
+0036    | OpCode[Print]
+0037    | OpCode[Nil]
+0038    | OpCode[Return]
+"#,
+            utf8_to_string(&buf)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn classes_methods() -> Result<()> {
+        let source = r#"
+        class Scone {
+            topping(first, second) {
+              print "scone with " + first + " and " + second;
+            }
+          }
+          
+          var scone = Scone();
+          scone.topping("berries", "cream");
+        "#;
+        let mut scanner = Scanner::new(source.to_string());
+        let tokens = scanner.scan_tokens()?;
+        let mut buf = vec![];
+        let compiler = Compiler::new_with_type_and_writer(tokens, Script, Some(&mut buf));
+        let _ = compiler.compile()?;
+        assert_eq!(
+            r#"== <fn topping> ==
+0000 0004 OpCode[Constant]                  0 'scone with '
+0002    | OpCode[GetLocal]                  1
+0004    | OpCode[Add]
+0005    | OpCode[Constant]                  1 ' and '
+0007    | OpCode[Add]
+0008    | OpCode[GetLocal]                  2
+0010    | OpCode[Add]
+0011    | OpCode[Print]
+0012 0005 OpCode[Nil]
+0013    | OpCode[Return]
+== <fn script> ==
+0000 0002 OpCode[Class]                     0 'Scone'
+0002    | OpCode[DefineGlobal]              0 'Scone'
+0004    | OpCode[GetGlobal]                 1 'Scone'
+0006 0005 OpCode[Closure]                   2 '<fn topping>'
+0008    | OpCode[Method]                    3 'topping'
+0010 0006 OpCode[Pop]
+0011 0008 OpCode[GetGlobal]                 5 'Scone'
+0013    | OpCode[Call]                      0
+0015    | OpCode[DefineGlobal]              4 'scone'
+0017 0009 OpCode[GetGlobal]                 6 'scone'
+0019    | OpCode[GetProperty]               7 'topping'
+0021    | OpCode[Constant]                  8 'berries'
+0023    | OpCode[Constant]                  9 'cream'
+0025    | OpCode[Call]                      2
+0027    | OpCode[Pop]
+0028    | OpCode[Nil]
+0029    | OpCode[Return]
 "#,
             utf8_to_string(&buf)
         );
