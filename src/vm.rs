@@ -514,14 +514,11 @@ impl<'a> VirtualMachine<'a> {
                     let v = v.clone();
                     drop(fields);
                     Ok((v, None))
-                    // self.pop(); // instance
-                    // self.push(v);
                 } else {
                     drop(fields);
                     let class = instance.class.clone();
                     let receiver = self.peek_at(0).clone(); // receiver
                     Ok((receiver, Some(class)))
-                    // self.bind_method(receiver, method);
                 }
             }
             Value::Object(Object::Receiver(instance, _)) => self.get_property(instance, property),
@@ -539,7 +536,10 @@ impl<'a> VirtualMachine<'a> {
     }
 
     fn bind_method(&mut self, receiver: Value, method: Rc<Closure>) {
-        let bound_method = BoundMethod::new(Rc::new(receiver), method);
+        let bound_method = match receiver {
+            Value::Object(Object::Receiver(r, _)) => BoundMethod::new(r, method),
+            _ => BoundMethod::new(Rc::new(receiver), method),
+        };
         self.push(Value::Object(Object::BoundMethod(bound_method)));
     }
 
@@ -637,6 +637,10 @@ impl<'a> VirtualMachine<'a> {
                         Value::Object(Object::Receiver(Rc::new(receiver), initializer.clone()));
                     self.call_function(&initializer.function, arg_count, start_index)?;
                 } else {
+                    if arg_count != 0 {
+                        bail!(self
+                            .runtime_error(&format!("Expected 0  arguments but got {}", arg_count)))
+                    }
                     self.stack[start_index] = receiver;
                 }
                 Ok(())
