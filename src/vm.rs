@@ -473,9 +473,8 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::GetProperty => {
                     let instance = self.peek_at(0);
                     let property = self.read_str_without_increment()?;
-                    let (value, class) = self.get_property(instance, property)?;
-                    if let Some(class) = class {
-                        let method = self.get_method(class, property)?;
+                    let (value, method) = self.get_property(instance, property)?;
+                    if let Some(method) = method {
                         self.bind_method(value, method);
                     } else {
                         self.pop(); // instance
@@ -506,7 +505,11 @@ impl<'a> VirtualMachine<'a> {
         Ok(())
     }
 
-    fn get_property(&self, instance: &Value, property: &str) -> Result<(Value, Option<Rc<Class>>)> {
+    fn get_property(
+        &self,
+        instance: &Value,
+        property: &str,
+    ) -> Result<(Value, Option<Rc<Closure>>)> {
         match instance {
             Value::Object(Object::Instance(instance)) => {
                 let fields = (*instance.fields).borrow();
@@ -517,8 +520,9 @@ impl<'a> VirtualMachine<'a> {
                 } else {
                     drop(fields);
                     let class = instance.class.clone();
+                    let method = self.get_method(class, property)?;
                     let receiver = self.peek_at(0).clone(); // receiver
-                    Ok((receiver, Some(class)))
+                    Ok((receiver, Some(method)))
                 }
             }
             Value::Object(Object::Receiver(instance, _)) => self.get_property(instance, property),
@@ -540,6 +544,7 @@ impl<'a> VirtualMachine<'a> {
             Value::Object(Object::Receiver(r, _)) => BoundMethod::new(r, method),
             _ => BoundMethod::new(Rc::new(receiver), method),
         };
+        self.pop(); // remove the instance
         self.push(Value::Object(Object::BoundMethod(bound_method)));
     }
 
@@ -635,6 +640,7 @@ impl<'a> VirtualMachine<'a> {
                 if let Some(initializer) = (*methods).borrow().get("init") {
                     self.stack[start_index] =
                         Value::Object(Object::Receiver(Rc::new(receiver), initializer.clone()));
+                    // receiver;
                     self.call_function(&initializer.function, arg_count, start_index)?;
                 } else {
                     if arg_count != 0 {
@@ -1189,6 +1195,7 @@ mod tests {
 
     #[test]
     fn vm_class_initializer_and_this() -> Result<()> {
+        init_logger_for_test();
         let mut buf = vec![];
         let mut vm = VirtualMachine::new_with_writer(Some(&mut buf));
         let source = r#"
