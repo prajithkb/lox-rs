@@ -880,6 +880,10 @@ impl<'a> Compiler<'a> {
         if can_assign && self.match_and_advance(&[TokenType::Equal]) {
             self.expression()?;
             self.emit_opcode_and_bytes(Opcode::SetProperty, name);
+        } else if self.match_and_advance(&[TokenType::LeftParen]) {
+            let arg_count = self.argument_list()?;
+            self.emit_opcode_and_bytes(Opcode::Invoke, name);
+            self.emit_byte(arg_count);
         } else {
             self.emit_opcode_and_bytes(Opcode::GetProperty, name);
         }
@@ -1762,13 +1766,147 @@ mod tests {
 0013    | OpCode[Call]                      0
 0015    | OpCode[DefineGlobal]              4 'scone'
 0017 0009 OpCode[GetGlobal]                 6 'scone'
-0019    | OpCode[GetProperty]               7 'topping'
-0021    | OpCode[Constant]                  8 'berries'
-0023    | OpCode[Constant]                  9 'cream'
-0025    | OpCode[Call]                      2
-0027    | OpCode[Pop]
-0028    | OpCode[Nil]
-0029    | OpCode[Return]
+0019    | OpCode[Constant]                  8 'berries'
+0021    | OpCode[Constant]                  9 'cream'
+0023    | OpCode[Invoke]                   (2 args)   7 'topping'
+0026    | OpCode[Pop]
+0027    | OpCode[Nil]
+0028    | OpCode[Return]
+"#,
+            utf8_to_string(&buf)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn class_initializer_with_this() -> Result<()> {
+        let source = r#"
+        class Scone {
+            topping(first, second) {
+              print "scone with " + first + " and " + second;
+            }
+          }
+          
+          var scone = Scone();
+          scone.topping("berries", "cream");
+        "#;
+        let mut scanner = Scanner::new(source.to_string());
+        let tokens = scanner.scan_tokens()?;
+        let mut buf = vec![];
+        let compiler = Compiler::new_with_type_and_writer(tokens, Script, Some(&mut buf));
+        let _ = compiler.compile()?;
+        assert_eq!(
+            r#"== <fn topping> ==
+0000 0004 OpCode[Constant]                  0 'scone with '
+0002    | OpCode[GetLocal]                  1
+0004    | OpCode[Add]
+0005    | OpCode[Constant]                  1 ' and '
+0007    | OpCode[Add]
+0008    | OpCode[GetLocal]                  2
+0010    | OpCode[Add]
+0011    | OpCode[Print]
+0012 0005 OpCode[Nil]
+0013    | OpCode[Return]
+== <fn script> ==
+0000 0002 OpCode[Class]                     0 'Scone'
+0002    | OpCode[DefineGlobal]              0 'Scone'
+0004    | OpCode[GetGlobal]                 1 'Scone'
+0006 0005 OpCode[Closure]                   2 '<fn topping>'
+0008    | OpCode[Method]                    3 'topping'
+0010 0006 OpCode[Pop]
+0011 0008 OpCode[GetGlobal]                 5 'Scone'
+0013    | OpCode[Call]                      0
+0015    | OpCode[DefineGlobal]              4 'scone'
+0017 0009 OpCode[GetGlobal]                 6 'scone'
+0019    | OpCode[Constant]                  8 'berries'
+0021    | OpCode[Constant]                  9 'cream'
+0023    | OpCode[Invoke]                   (2 args)   7 'topping'
+0026    | OpCode[Pop]
+0027    | OpCode[Nil]
+0028    | OpCode[Return]
+"#,
+            utf8_to_string(&buf)
+        );
+        let source = r#"
+        class Brunch {
+            init(food, drinks) {
+                this.food = food;
+                this.drinks = drinks;
+            }
+
+            set_dessert(item) {
+                this.dessert = item;
+                return this;
+            }
+        }
+                  
+        var brunch = Brunch("eggs", "coffee");
+
+        var brunch_with_dessert = brunch.set_dessert("cake");
+        
+        print brunch_with_dessert.food + " and " + brunch_with_dessert.drinks + " with " + brunch_with_dessert.dessert + " as dessert";
+        "#;
+        let mut scanner = Scanner::new(source.to_string());
+        let tokens = scanner.scan_tokens()?;
+        let mut buf = vec![];
+        let compiler = Compiler::new_with_type_and_writer(tokens, Script, Some(&mut buf));
+        let _ = compiler.compile()?;
+        assert_eq!(
+            r#"== <fn init> ==
+0000 0004 OpCode[GetLocal]                  0
+0002    | OpCode[GetLocal]                  1
+0004    | OpCode[SetProperty]               0 'food'
+0006    | OpCode[Pop]
+0007 0005 OpCode[GetLocal]                  0
+0009    | OpCode[GetLocal]                  2
+0011    | OpCode[SetProperty]               1 'drinks'
+0013    | OpCode[Pop]
+0014 0006 OpCode[GetLocal]                  0
+0016    | OpCode[Return]
+== <fn set_dessert> ==
+0000 0009 OpCode[GetLocal]                  0
+0002    | OpCode[GetLocal]                  1
+0004    | OpCode[SetProperty]               0 'dessert'
+0006    | OpCode[Pop]
+0007 0010 OpCode[GetLocal]                  0
+0009    | OpCode[Return]
+0010 0011 OpCode[Nil]
+0011    | OpCode[Return]
+== <fn script> ==
+0000 0002 OpCode[Class]                     0 'Brunch'
+0002    | OpCode[DefineGlobal]              0 'Brunch'
+0004    | OpCode[GetGlobal]                 1 'Brunch'
+0006 0006 OpCode[Closure]                   2 '<fn init>'
+0008    | OpCode[Method]                    3 'init'
+0010 0011 OpCode[Closure]                   4 '<fn set_dessert>'
+0012    | OpCode[Method]                    5 'set_dessert'
+0014 0012 OpCode[Pop]
+0015 0014 OpCode[GetGlobal]                 7 'Brunch'
+0017    | OpCode[Constant]                  8 'eggs'
+0019    | OpCode[Constant]                  9 'coffee'
+0021    | OpCode[Call]                      2
+0023    | OpCode[DefineGlobal]              6 'brunch'
+0025 0016 OpCode[GetGlobal]                11 'brunch'
+0027    | OpCode[Constant]                 13 'cake'
+0029    | OpCode[Invoke]                   (1 args)  12 'set_dessert'
+0032    | OpCode[DefineGlobal]             10 'brunch_with_dessert'
+0034 0018 OpCode[GetGlobal]                14 'brunch_with_dessert'
+0036    | OpCode[GetProperty]              15 'food'
+0038    | OpCode[Constant]                 16 ' and '
+0040    | OpCode[Add]
+0041    | OpCode[GetGlobal]                17 'brunch_with_dessert'
+0043    | OpCode[GetProperty]              18 'drinks'
+0045    | OpCode[Add]
+0046    | OpCode[Constant]                 19 ' with '
+0048    | OpCode[Add]
+0049    | OpCode[GetGlobal]                20 'brunch_with_dessert'
+0051    | OpCode[GetProperty]              21 'dessert'
+0053    | OpCode[Add]
+0054    | OpCode[Constant]                 22 ' as dessert'
+0056    | OpCode[Add]
+0057    | OpCode[Print]
+0058    | OpCode[Nil]
+0059    | OpCode[Return]
 "#,
             utf8_to_string(&buf)
         );

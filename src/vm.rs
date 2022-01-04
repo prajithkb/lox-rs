@@ -486,8 +486,56 @@ impl<'a> VirtualMachine<'a> {
                     let method_name = self.read_string()?;
                     self.define_method(method_name)?;
                 }
+                Opcode::Invoke => {
+                    let method = self.read_string()?;
+                    let arg_count = self.read_byte() as usize;
+                    let receiver = self.peek_at(arg_count);
+                    let fn_start_stack_index = self.stack_top - arg_count - 1;
+                    match receiver {
+                        Value::Object(Object::Receiver(v, _)) => {
+                            let v = &**v;
+                            match v {
+                                Value::Object(Object::Instance(instance)) => {
+                                    let class = instance.class.clone();
+                                    let (method, receiver) =
+                                        self.get_method_and_receiver(class, receiver, &method)?;
+                                    self.stack[fn_start_stack_index] = receiver;
+                                    self.call_function(
+                                        &method.function,
+                                        arg_count,
+                                        fn_start_stack_index,
+                                    )?;
+                                }
+                                _ => bail!(self.runtime_error("Only instance can have methods")),
+                            }
+                        }
+                        Value::Object(Object::Instance(instance)) => {
+                            let class = instance.class.clone();
+                            let (method, receiver) =
+                                self.get_method_and_receiver(class, receiver, &method)?;
+                            self.stack[fn_start_stack_index] = receiver;
+                            self.call_function(&method.function, arg_count, fn_start_stack_index)?;
+                        }
+                        _ => bail!(self.runtime_error("Only instance can have methods")),
+                    };
+                }
             };
         }
+    }
+    fn get_method_and_receiver(
+        &self,
+        class: Rc<Class>,
+        receiver: &Value,
+        method: &str,
+    ) -> Result<(Rc<Closure>, Value)> {
+        let method = self.get_method(class, method)?;
+        let receiver = match receiver {
+            Value::Object(Object::Receiver(r, _)) => {
+                Value::Object(Object::Receiver(r.clone(), method.clone()))
+            }
+            _ => Value::Object(Object::Receiver(Rc::new(receiver.clone()), method.clone())),
+        };
+        Ok((method, receiver))
     }
 
     fn set_property(&self, instance: &Value, property: String, value: Value) -> Result<()> {
@@ -1195,7 +1243,6 @@ mod tests {
 
     #[test]
     fn vm_class_initializer_and_this() -> Result<()> {
-        init_logger_for_test();
         let mut buf = vec![];
         let mut vm = VirtualMachine::new_with_writer(Some(&mut buf));
         let source = r#"
@@ -1223,7 +1270,7 @@ mod tests {
                 this.drinks = drinks;
             }
 
-            dessert(item) {
+            set_dessert(item) {
                 this.dessert = item;
                 return this;
             }
@@ -1231,7 +1278,7 @@ mod tests {
                   
         var brunch = Brunch("eggs", "coffee");
 
-        var brunch_with_dessert = brunch.dessert("cake");
+        var brunch_with_dessert = brunch.set_dessert("cake");
         
         print brunch_with_dessert.food + " and " + brunch_with_dessert.drinks + " with " + brunch_with_dessert.dessert + " as dessert";
 
@@ -1241,6 +1288,44 @@ mod tests {
             "eggs and coffee with cake as dessert\n",
             utf8_to_string(&buf)
         );
+
+        let mut buf = vec![];
+        let mut vm = VirtualMachine::new_with_writer(Some(&mut buf));
+        let source = r#"
+        class Cake {
+    
+            init(type) {
+                this.type = type;
+            }
+            taste() {
+                this.inner_taste();
+                this.flavor = "Belgian chocolate";
+            }
+        
+             taste_again() {
+                this.inner_taste();
+            }
+        
+            inner_taste() {
+                var adjective = "delicious";
+                print "The " + this.flavor + " " + this.type + " is " + adjective + "!";
+            }
+        }
+
+        var cake = Cake("cake");
+        cake.flavor = "German chocolate";
+        cake.taste();
+        cake.taste_again(); 
+    
+    
+        var cookie = Cake("cookie");
+        cookie.flavor = "German chocolate";
+        cookie.taste();
+        cookie.taste_again(); 
+
+        "#;
+        vm.interpret(source.to_string())?;
+        assert_eq!("The German chocolate cake is delicious!\nThe Belgian chocolate cake is delicious!\nThe German chocolate cookie is delicious!\nThe Belgian chocolate cookie is delicious!\n", utf8_to_string(&buf));
 
         let mut buf = vec![];
         let mut vm = VirtualMachine::new_with_writer(Some(&mut buf));

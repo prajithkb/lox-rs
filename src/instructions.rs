@@ -47,6 +47,7 @@ pub enum Opcode {
     SetProperty,
     GetProperty,
     Method,
+    Invoke,
 }
 
 impl Display for Opcode {
@@ -150,6 +151,28 @@ pub fn closure_instruction(
     offset
 }
 
+pub fn invoke_instruction(
+    instruction: &Opcode,
+    chunk: &Chunk,
+    offset: usize,
+    writer: &mut dyn Write,
+) -> usize {
+    let constant = *chunk.code.read_item_at(offset + 1);
+    let arg_count = *chunk.code.read_item_at(offset + 2);
+
+    write!(
+        writer,
+        "{:<30}   ({} args){:4} '",
+        instruction.to_string(),
+        arg_count,
+        constant
+    )
+    .expect("Write failed");
+    print_value(chunk.constants.read_item_at(constant as usize), writer);
+    writeln!(writer, "'").expect("Write failed");
+    offset + 3
+}
+
 pub fn disassemble_instruction(
     byte: u8,
     chunk: &Chunk,
@@ -195,6 +218,7 @@ pub fn disassemble_instruction(
             Opcode::SetProperty => constant_instruction(&instruction, chunk, offset, writer),
             Opcode::GetProperty => constant_instruction(&instruction, chunk, offset, writer),
             Opcode::Method => constant_instruction(&instruction, chunk, offset, writer),
+            Opcode::Invoke => invoke_instruction(&instruction, chunk, offset, writer),
         },
         Err(e) => {
             eprintln!(

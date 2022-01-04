@@ -1,30 +1,18 @@
- class Cake {
-    
-    init(type) {
-        this.type = type;
-    }
-    taste() {
-        this.inner_taste();
-        this.flavor = "Belgian chocolate";
-    }
+ class Brunch {
+            init(food, drinks) {
+                this.food = food;
+                this.drinks = drinks;
+            }
 
-     taste_again() {
-        this.inner_taste();
-    }
+            set_dessert(item) {
+                this.dessert = item;
+                return this;
+            }
+        }
+                  
+        var brunch = Brunch("eggs", "coffee");
 
-    inner_taste() {
-        var adjective = "delicious";
-        print "The " + this.flavor + " " + this.type + " is " + adjective + "!";
-    }
-}
-
-var cake = Cake("cake");
-cake.flavor = "German chocolate";
-cake.taste();
-cake.taste_again(); 
-
-
-var cake = Cake("cookie");
-cake.flavor = "German chocolate";
-cake.taste();
-cake.taste_again(); 
+        var brunch_with_dessert = brunch.set_dessert("cake");
+        
+        print brunch_with_dessert.food + " and " + brunch_with_dessert.drinks + " with " + brunch_with_dessert.dessert + " as dessert";
+        
