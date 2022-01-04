@@ -16,8 +16,7 @@ use crate::errors::*;
 use crate::instructions::{print_value, Opcode};
 use crate::lox::{utf8_to_string, Shared, Writer};
 use crate::objects::{
-    shared, BoundMethod, Class, Closure, Function, Instance, Location, Object, Upvalue, Value,
-    Values,
+    shared, Class, Closure, Function, Instance, Location, Object, Upvalue, Value, Values,
 };
 use crate::scanner::Scanner;
 use crate::tokens::pretty_print;
@@ -211,10 +210,6 @@ impl<'a> VirtualMachine<'a> {
         let v = &self.stack[index];
         match &self.stack[index] {
             Value::Object(Object::Closure(c)) => c,
-            Value::Object(Object::BoundMethod(BoundMethod {
-                receiver: _,
-                closure,
-            })) => closure,
             Value::Object(Object::Receiver(_, closure)) => closure,
             _ => {
                 if log::log_enabled!(Level::Trace) {
@@ -588,12 +583,12 @@ impl<'a> VirtualMachine<'a> {
     }
 
     fn bind_method(&mut self, receiver: Value, method: Rc<Closure>) {
-        let bound_method = match receiver {
-            Value::Object(Object::Receiver(r, _)) => BoundMethod::new(r, method),
-            _ => BoundMethod::new(Rc::new(receiver), method),
+        let method_with_receiver = match receiver {
+            Value::Object(Object::Receiver(r, _)) => Value::Object(Object::Receiver(r, method)),
+            _ => Value::Object(Object::Receiver(Rc::new(receiver), method)),
         };
         self.pop(); // remove the instance
-        self.push(Value::Object(Object::BoundMethod(bound_method)));
+        self.push(method_with_receiver);
     }
 
     fn define_method(&mut self, method_name: String) -> Result<()> {
@@ -699,9 +694,9 @@ impl<'a> VirtualMachine<'a> {
                 }
                 Ok(())
             }
-            Value::Object(Object::BoundMethod(bound_method)) => {
-                let closure = bound_method.closure.clone();
-                let receiver = bound_method.receiver.clone();
+            Value::Object(Object::Receiver(receiver, closure)) => {
+                let receiver = receiver.clone();
+                let closure = closure.clone();
                 self.stack[start_index] =
                     Value::Object(Object::Receiver(receiver, closure.clone()));
                 self.call_function(&closure.function, arg_count, start_index)
