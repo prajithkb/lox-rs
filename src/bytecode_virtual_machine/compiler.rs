@@ -9,15 +9,16 @@ use log::log_enabled;
 use num_enum::{FromPrimitive, IntoPrimitive};
 
 use crate::{
-    chunk::Chunk,
+    common::lox::Writer,
+    common::tokens::{Literal, Token, TokenType},
     errors::*,
-    instructions::Opcode,
-    lox::Writer,
-    objects::{Function, Object, UserDefinedFunction, Value},
-    tokens::{Literal, TokenType},
 };
 
-use crate::tokens::Token;
+use super::{
+    chunk::Chunk,
+    instructions::Opcode,
+    objects::{Function, Object, UserDefinedFunction, Value},
+};
 
 fn parse_error(token: &Token, message: &str) -> ErrorKind {
     ErrorKind::ParseError(format!(
@@ -1149,10 +1150,9 @@ fn as_two_bytes(jump: usize) -> (u8, u8) {
 
 #[cfg(test)]
 mod tests {
-    use crate::{
-        compiler::FunctionType::Script, errors::*, lox::utf8_to_string,
-        objects::Function::UserDefined, scanner::Scanner,
-    };
+    use crate::bytecode_virtual_machine::compiler::FunctionType;
+    use crate::bytecode_virtual_machine::objects::Function::UserDefined;
+    use crate::{common::lox::utf8_to_string, common::scanner::Scanner, errors::*};
 
     use super::Compiler;
 
@@ -1638,7 +1638,8 @@ mod tests {
         let mut scanner = Scanner::new(source.to_string());
         let tokens = scanner.scan_tokens()?;
         let mut buf = vec![];
-        let compiler = Compiler::new_with_type_and_writer(tokens, Script, Some(&mut buf));
+        let compiler =
+            Compiler::new_with_type_and_writer(tokens, FunctionType::Script, Some(&mut buf));
         let _ = compiler.compile()?;
         assert_eq!(
             r#"== <fn inner> ==
@@ -1693,7 +1694,8 @@ mod tests {
         let mut scanner = Scanner::new(source.to_string());
         let tokens = scanner.scan_tokens()?;
         let mut buf = vec![];
-        let compiler = Compiler::new_with_type_and_writer(tokens, Script, Some(&mut buf));
+        let compiler =
+            Compiler::new_with_type_and_writer(tokens, FunctionType::Script, Some(&mut buf));
         let _ = compiler.compile()?;
         assert_eq!(
             r#"== <fn script> ==
@@ -1741,7 +1743,8 @@ mod tests {
         let mut scanner = Scanner::new(source.to_string());
         let tokens = scanner.scan_tokens()?;
         let mut buf = vec![];
-        let compiler = Compiler::new_with_type_and_writer(tokens, Script, Some(&mut buf));
+        let compiler =
+            Compiler::new_with_type_and_writer(tokens, FunctionType::Script, Some(&mut buf));
         let _ = compiler.compile()?;
         assert_eq!(
             r#"== <fn topping> ==
@@ -1793,7 +1796,8 @@ mod tests {
         let mut scanner = Scanner::new(source.to_string());
         let tokens = scanner.scan_tokens()?;
         let mut buf = vec![];
-        let compiler = Compiler::new_with_type_and_writer(tokens, Script, Some(&mut buf));
+        let compiler =
+            Compiler::new_with_type_and_writer(tokens, FunctionType::Script, Some(&mut buf));
         let _ = compiler.compile()?;
         assert_eq!(
             r#"== <fn topping> ==
@@ -1849,7 +1853,8 @@ mod tests {
         let mut scanner = Scanner::new(source.to_string());
         let tokens = scanner.scan_tokens()?;
         let mut buf = vec![];
-        let compiler = Compiler::new_with_type_and_writer(tokens, Script, Some(&mut buf));
+        let compiler =
+            Compiler::new_with_type_and_writer(tokens, FunctionType::Script, Some(&mut buf));
         let _ = compiler.compile()?;
         assert_eq!(
             r#"== <fn init> ==

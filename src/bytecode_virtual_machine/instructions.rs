@@ -2,9 +2,9 @@ use std::{convert::TryFrom, fmt::Display, io::Write};
 
 use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-use crate::{
+use super::{
     chunk::Chunk,
-    objects::{Function::UserDefined, Object, Value},
+    objects::{Function, Object, Value},
 };
 
 #[derive(Debug, PartialEq, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
@@ -129,7 +129,7 @@ pub fn closure_instruction(
     if let Value::Object(Object::Function(c)) = v {
         let function = &**c;
         match function {
-            UserDefined(u) => {
+            Function::UserDefined(u) => {
                 for _ in 0..u.upvalue_count {
                     let is_local = *chunk.code.read_item_at(offset);
                     offset += 1;

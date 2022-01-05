@@ -1,6 +1,8 @@
 use std::{cell::RefCell, collections::HashMap, fmt::Display, rc::Rc};
 
-use crate::{chunk::Chunk, lox::Shared};
+use crate::common::lox::Shared;
+
+use super::chunk::Chunk;
 
 #[derive(Debug, Clone)]
 pub enum Value {

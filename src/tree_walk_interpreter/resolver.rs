@@ -1,9 +1,10 @@
 use std::collections::hash_map::Entry::{Occupied, Vacant};
 use std::collections::HashMap;
 
+use crate::common::tokens::Token;
 use crate::errors::*;
-use crate::parser::{Expr, Stmt};
-use crate::tokens::Token;
+
+use super::parser::{Expr, Stmt};
 
 #[derive(Default)]
 pub struct Resolver {
@@ -302,7 +303,7 @@ impl Resolver {
 mod tests {
     use std::collections::HashMap;
 
-    use crate::{errors::*, parser::Parser, scanner::Scanner};
+    use crate::{common::scanner::Scanner, errors::*, tree_walk_interpreter::parser::Parser};
 
     use super::Resolver;
 

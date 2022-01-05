@@ -31,15 +31,6 @@ mod errors {
 }
 pub use errors::*;
 
-mod interpreter;
-pub mod lox;
-mod parser;
-mod resolver;
-mod scanner;
-mod tokens;
-
-mod chunk;
-mod compiler;
-mod instructions;
-mod objects;
-pub mod vm;
+pub mod bytecode_virtual_machine;
+pub mod common;
+pub mod tree_walk_interpreter;

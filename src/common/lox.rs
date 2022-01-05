@@ -9,8 +9,10 @@ use std::{
 use log::{debug, info};
 
 use crate::{
-    errors::*, interpreter::Interpreter, parser::Parser, resolver::Resolver, scanner::Scanner,
-    vm::VirtualMachine,
+    bytecode_virtual_machine::vm::VirtualMachine,
+    common::scanner::Scanner,
+    errors::*,
+    tree_walk_interpreter::{interpreter::Interpreter, parser::Parser, resolver::Resolver},
 };
 
 pub type Shared<T> = Rc<RefCell<T>>;

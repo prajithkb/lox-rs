@@ -1,9 +1,13 @@
+use crate::{
+    common::{
+        lox::report_error,
+        tokens::{Literal, Token, TokenType},
+    },
+    errors::*,
+    ErrorKind,
+};
 use log::debug;
-
-use crate::{errors::*, lox::report_error, tokens::TokenType};
 use std::{fmt::Display, io::stdout, rc::Rc};
-
-use crate::tokens::{Literal, Token};
 
 /// Expressions
 #[derive(Debug, PartialEq)]
@@ -620,9 +624,11 @@ impl<'a> Parser<'a> {
 #[cfg(test)]
 mod tests {
     use crate::{
+        common::{
+            scanner::Scanner,
+            tokens::{Literal, Token, TokenType},
+        },
         errors::*,
-        scanner::Scanner,
-        tokens::{Literal, Token, TokenType},
     };
 
     use super::{Expr, Parser};

@@ -3,10 +3,11 @@ use std::{collections::HashMap, io::stderr};
 use log::debug;
 
 use crate::{
+    common::lox::{report_error, report_error_with_line},
     errors::*,
-    lox::{report_error, report_error_with_line},
-    tokens::{Literal, Token, TokenType},
 };
+
+use super::tokens::{Literal, Token, TokenType};
 
 fn scan_error(line: usize, message: &str) -> ErrorKind {
     ErrorKind::ScanError(format!("[line: {}] Error: message: {}", line, message))
@@ -252,11 +253,13 @@ impl Scanner {
 
 #[cfg(test)]
 mod tests {
-    use crate::tokens::{Literal, Token, TokenType};
 
     use super::Scanner;
 
-    use crate::errors::*;
+    use crate::{
+        common::tokens::{Literal, Token, TokenType},
+        errors::*,
+    };
 
     #[test]
     fn scanner_tests() -> Result<()> {

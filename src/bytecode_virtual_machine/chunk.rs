@@ -1,9 +1,6 @@
 use std::io::{stdout, Write};
 
-use crate::{
-    instructions::{self},
-    objects::Value,
-};
+use super::{instructions, objects::Value};
 
 #[derive(Debug, Clone)]
 pub struct Chunk {
@@ -135,7 +132,9 @@ impl<T> Memory<T> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        chunk::Chunk, errors::*, instructions::Opcode, lox::utf8_to_string, objects::Value,
+        bytecode_virtual_machine::{chunk::Chunk, instructions::Opcode, objects::Value},
+        common::lox::utf8_to_string,
+        errors::*,
     };
 
     #[test]

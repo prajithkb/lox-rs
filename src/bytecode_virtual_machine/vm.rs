@@ -10,16 +10,16 @@ use std::time::Instant;
 
 use log::{info, log_enabled, trace, Level};
 
-use crate::chunk::Chunk;
-use crate::compiler::Compiler;
-use crate::errors::*;
-use crate::instructions::{print_value, Opcode};
-use crate::lox::{utf8_to_string, Shared, Writer};
-use crate::objects::{
+use crate::bytecode_virtual_machine::chunk::Chunk;
+use crate::bytecode_virtual_machine::compiler::Compiler;
+use crate::bytecode_virtual_machine::instructions::{print_value, Opcode};
+use crate::bytecode_virtual_machine::objects::{
     shared, Class, Closure, Function, Instance, Location, Object, Upvalue, Value, Values,
 };
-use crate::scanner::Scanner;
-use crate::tokens::pretty_print;
+use crate::common::lox::{utf8_to_string, Shared, Writer};
+use crate::common::scanner::Scanner;
+use crate::common::tokens::pretty_print;
+use crate::errors::*;
 
 #[derive(Debug)]
 struct CallFrame {
@@ -898,11 +898,9 @@ fn print_stack_value(value: &Value, writer: &mut dyn Write) {
 
 #[cfg(test)]
 mod tests {
+    use crate::common::lox::{print_error, utf8_to_string};
     #[allow(unused_imports)]
-    use crate::{
-        errors::*,
-        lox::{init_logger_for_test, print_error, utf8_to_string},
-    };
+    use crate::errors::*;
 
     use super::VirtualMachine;
 

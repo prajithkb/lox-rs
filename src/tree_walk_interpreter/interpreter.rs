@@ -6,11 +6,11 @@ use std::io::Write;
 use std::rc::Rc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::lox::Shared;
-use crate::parser::{Expr, Stmt};
-
+use crate::common::lox::Shared;
+use crate::common::tokens::{Literal, Token, TokenType};
 use crate::errors::*;
-use crate::tokens::{Literal, Token, TokenType};
+
+use super::parser::{Expr, Stmt};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Value {
@@ -163,6 +163,7 @@ pub struct Interpreter<'a> {
 }
 
 impl<'a> Interpreter<'a> {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Interpreter::new_with_writer(None)
     }
@@ -894,15 +895,16 @@ fn runtime_error(message: String) -> ErrorKind {
 #[cfg(test)]
 mod tests {
     use crate::{
+        common::scanner::Scanner,
         errors::*,
-        interpreter::Value,
-        parser::{Parser, Stmt},
-        resolver::Resolver,
-        scanner::Scanner,
+        tree_walk_interpreter::{
+            parser::{Parser, Stmt},
+            resolver::Resolver,
+        },
     };
     use std::{cell::RefCell, f64::EPSILON, rc::Rc};
 
-    use super::{Environment, Interpreter};
+    use super::{Environment, Interpreter, Value};
 
     fn evaluate_expression_statement(
         interpreter: &mut Interpreter,
