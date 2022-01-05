@@ -4,7 +4,6 @@ use std::f64::EPSILON;
 use std::io::{stdout, Write};
 use std::mem::{self, MaybeUninit};
 use std::ops::Range;
-use std::panic;
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -20,6 +19,8 @@ use crate::common::lox::{utf8_to_string, Shared, Writer};
 use crate::common::scanner::Scanner;
 use crate::common::tokens::pretty_print;
 use crate::errors::*;
+
+const STACK_SIZE: usize = 1024;
 
 #[derive(Debug)]
 struct CallFrame {
@@ -37,7 +38,7 @@ impl CallFrame {
 }
 
 pub struct VirtualMachine<'a> {
-    stack: [Value; 1024],
+    stack: [Value; STACK_SIZE],
     stack_top: usize,
     call_frames: Vec<CallFrame>,
     runtime_values: Values,
@@ -54,12 +55,13 @@ impl<'a> std::fmt::Debug for VirtualMachine<'a> {
     }
 }
 
-fn init_stack() -> [Value; 1024] {
+fn init_stack() -> [Value; STACK_SIZE] {
     let data = {
         // Create an uninitialized array of `MaybeUninit`. The `assume_init` is
         // safe because the type we are claiming to have initialized here is a
         // bunch of `MaybeUninit`s, which do not require initialization.
-        let mut data: [MaybeUninit<Value>; 1024] = unsafe { MaybeUninit::uninit().assume_init() };
+        let mut data: [MaybeUninit<Value>; STACK_SIZE] =
+            unsafe { MaybeUninit::uninit().assume_init() };
 
         // Dropping a `MaybeUninit` does nothing. Thus using raw pointer
         // assignment instead of `ptr::write` does not cause the old
@@ -72,7 +74,7 @@ fn init_stack() -> [Value; 1024] {
 
         // Everything is initialized. Transmute the array to the
         // initialized type.
-        unsafe { mem::transmute::<_, [Value; 1024]>(data) }
+        unsafe { mem::transmute::<_, [Value; STACK_SIZE]>(data) }
     };
     data
 }
@@ -109,7 +111,7 @@ impl<'a> VirtualMachine<'a> {
         let main_function = Rc::new(compiler.compile()?);
         info!("Compiled in {} us", start_time.elapsed().as_micros());
         self.check_arguments(&main_function, 0)?;
-        self.push(Value::Object(Object::Closure(Closure::new(main_function))));
+        self.push(Value::Object(Object::Closure(Closure::new(main_function))))?;
         self.call_frames.push(CallFrame::new(0));
         let start_time = Instant::now();
         let result = self.run();
@@ -164,53 +166,74 @@ impl<'a> VirtualMachine<'a> {
     }
 
     #[inline]
-    fn read_byte_at(&self, ip: usize) -> u8 {
-        let chunk = &*self.current_chunk();
-        *chunk.code.read_item_at(ip)
+    fn read_byte_at(&self, ip: usize) -> Result<u8> {
+        let chunk = &*self.current_chunk()?;
+        Ok(*chunk.code.read_item_at(ip))
     }
 
     #[inline]
-    fn read_byte(&mut self) -> u8 {
+    fn read_byte(&mut self) -> Result<u8> {
         let ip = self.ip();
-        let v = self.read_byte_at(ip);
+        let v = self.read_byte_at(ip)?;
         self.call_frame_mut().ip += 1;
-        v
+        Ok(v)
     }
 
     #[inline]
-    fn read_constant(&mut self) -> Value {
+    fn read_constant(&mut self) -> Result<Value> {
         let ip = self.ip();
-        let v = self.read_constant_at(ip).clone();
+        let v = self.read_constant_at(ip)?.clone();
         self.call_frame_mut().ip += 1;
-        v
+        Ok(v)
     }
 
     #[inline]
-    fn read_constant_at(&self, ip: usize) -> &Value {
-        let chunk = self.current_chunk();
-        chunk.read_constant_at(ip)
+    fn read_constant_at(&self, ip: usize) -> Result<&Value> {
+        let chunk = self.current_chunk()?;
+        Ok(chunk.read_constant_at(ip))
     }
 
     #[inline]
-    fn current_chunk(&self) -> &Chunk {
-        let function = self.current_function();
+    fn current_chunk(&self) -> Result<&Chunk> {
+        let function = self.current_function()?;
         match function {
-            Function::UserDefined(u) => &u.chunk,
+            Function::UserDefined(u) => Ok(&u.chunk),
         }
     }
 
     #[inline]
-    fn current_closure(&self) -> &Closure {
+    fn current_closure(&self) -> Result<&Closure> {
         let index = self.call_frame().fn_start_stack_index;
         self.closure_from_stack(index)
     }
 
+    fn get_stack(&self, index: usize) -> Result<&Value> {
+        if index > self.stack_top {
+            bail!(self.runtime_error(&format!(
+                "VM BUG: index {} out of bounds, stack size = {}",
+                index, STACK_SIZE
+            )))
+        }
+        Ok(&self.stack[index])
+    }
+
+    fn set_stack_mut(&mut self, index: usize, v: Value) -> Result<()> {
+        if index > STACK_SIZE {
+            bail!(self.runtime_error(&format!(
+                "Stack overflow, stack size = {}, index = {}",
+                STACK_SIZE, index
+            )));
+        }
+        self.stack[index] = v;
+        Ok(())
+    }
+
     #[inline]
-    fn closure_from_stack(&self, index: usize) -> &Closure {
-        let v = &self.stack[index];
-        match &self.stack[index] {
-            Value::Object(Object::Closure(c)) => c,
-            Value::Object(Object::Receiver(_, closure)) => closure,
+    fn closure_from_stack(&self, index: usize) -> Result<&Closure> {
+        let v = self.get_stack(index)?;
+        match v {
+            Value::Object(Object::Closure(c)) => Ok(c),
+            Value::Object(Object::Receiver(_, closure)) => Ok(closure),
             _ => {
                 if log::log_enabled!(Level::Trace) {
                     trace!(
@@ -218,25 +241,25 @@ impl<'a> VirtualMachine<'a> {
                         self.sanitized_stack(0..self.stack_top, false),
                     );
                 }
-                panic!(
+                bail!(self.runtime_error(&format!(
                     "VM BUG: Expected closure at stack index: {} but got ({})",
                     index, v,
-                )
+                )))
             }
         }
     }
 
     #[inline]
-    fn current_function(&self) -> &Function {
-        let v = self.current_closure();
-        &v.function
+    fn current_function(&self) -> Result<&Function> {
+        let v = self.current_closure()?;
+        Ok(&v.function)
     }
 
     #[inline]
-    fn read_short(&mut self) -> u16 {
-        let first = self.read_byte() as u16;
-        let second = self.read_byte() as u16;
-        first << 8 | second
+    fn read_short(&mut self) -> Result<u16> {
+        let first = self.read_byte()? as u16;
+        let second = self.read_byte()? as u16;
+        Ok(first << 8 | second)
     }
 
     fn run(&mut self) -> Result<()> {
@@ -249,10 +272,10 @@ impl<'a> VirtualMachine<'a> {
                     self.sanitized_stack(0..self.stack_top, false)
                 );
                 let ip = self.ip();
-                self.current_chunk()
+                self.current_chunk()?
                     .disassemble_instruction_with_writer(ip, &mut buf);
             }
-            let byte = self.read_byte();
+            let byte = self.read_byte()?;
             let instruction: Opcode = Opcode::try_from(byte).map_err(|e| {
                 self.runtime_error(&format!(
                     "Invalid instruction (byte:{}) at {}, error: {}",
@@ -262,7 +285,7 @@ impl<'a> VirtualMachine<'a> {
                 ))
             })?;
             if log_enabled!(Level::Trace) {
-                let fun_name = (*self.current_function()).to_string();
+                let fun_name = (*self.current_function()?).to_string();
                 trace!(
                     "In function {} Next Instruction: [{}]",
                     fun_name,
@@ -271,14 +294,14 @@ impl<'a> VirtualMachine<'a> {
             }
             match instruction {
                 Opcode::Constant => {
-                    let constant = self.read_constant();
-                    self.push(constant);
+                    let constant = self.read_constant()?;
+                    self.push(constant)?;
                 }
                 Opcode::Return => {
                     trace!("Call frame count: {}", self.call_frames.len());
                     let fn_starting_pointer = self.call_frame().fn_start_stack_index;
                     let result = self.pop();
-                    self.close_upvalues(fn_starting_pointer);
+                    self.close_upvalues(fn_starting_pointer)?;
                     if self.call_frames.len() == 1 {
                         return Ok(());
                     }
@@ -286,12 +309,12 @@ impl<'a> VirtualMachine<'a> {
                     // drop all the local values for the last function
                     self.stack_top = fn_starting_pointer;
                     // push the return result
-                    self.push(result);
+                    self.push(result)?;
                 }
                 Opcode::Negate => {
-                    if let Value::Number(v) = self.peek_at(0) {
+                    if let Value::Number(v) = self.peek_at(0)? {
                         let result = Value::Number(-v);
-                        self.push(result);
+                        self.push(result)?;
                     } else {
                         bail!(self.runtime_error("Can only negate numbers."));
                     }
@@ -300,16 +323,16 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::Subtract => self.binary_op(|a, b| Value::Number(a - b))?,
                 Opcode::Multiply => self.binary_op(|a, b| Value::Number(a * b))?,
                 Opcode::Divide => self.binary_op(|a, b| Value::Number(a / b))?,
-                Opcode::Nil => self.push(Value::Nil),
-                Opcode::True => self.push(Value::Bool(true)),
-                Opcode::False => self.push(Value::Bool(false)),
+                Opcode::Nil => self.push(Value::Nil)?,
+                Opcode::True => self.push(Value::Bool(true))?,
+                Opcode::False => self.push(Value::Bool(false))?,
                 Opcode::Not => {
                     let v = self.pop();
-                    self.push(Value::Bool(is_falsey(&v)))
+                    self.push(Value::Bool(is_falsey(&v)))?
                 }
                 Opcode::BangEqual => {
                     let v = self.equals()?;
-                    self.push(Value::Bool(!v))
+                    self.push(Value::Bool(!v))?
                 }
                 Opcode::Greater => self.binary_op(|a, b| Value::Bool(a > b))?,
                 Opcode::GreaterEqual => self.binary_op(|a, b| Value::Bool(a >= b))?,
@@ -317,7 +340,7 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::LessEqual => self.binary_op(|a, b| Value::Bool(a <= b))?,
                 Opcode::EqualEqual => {
                     let v = self.equals()?;
-                    self.push(Value::Bool(v))
+                    self.push(Value::Bool(v))?
                 }
                 Opcode::Print => {
                     let v = self.pop();
@@ -337,7 +360,7 @@ impl<'a> VirtualMachine<'a> {
                     let value = self.runtime_values.get(name);
                     if let Some(v) = value {
                         let v = v.clone();
-                        self.push(v)
+                        self.push(v)?
                     } else {
                         bail!(self.runtime_error(&format!("Undefined variable '{}'", &name)))
                     }
@@ -345,7 +368,7 @@ impl<'a> VirtualMachine<'a> {
                 }
                 Opcode::SetGlobal => {
                     let name = self.read_string()?;
-                    let value = self.peek_at(0).clone();
+                    let value = self.peek_at(0)?.clone();
                     let v = self.runtime_values.get_mut(&name);
                     match v {
                         Some(e) => {
@@ -358,38 +381,38 @@ impl<'a> VirtualMachine<'a> {
                     }
                 }
                 Opcode::GetLocal => {
-                    let index = self.read_byte();
+                    let index = self.read_byte()? as usize;
                     let fn_start_pointer = self.call_frame().fn_start_stack_index;
-                    let v = self.stack[fn_start_pointer + index as usize].clone();
-                    self.push(v);
+                    let v = self.get_stack(fn_start_pointer + index)?.clone();
+                    self.push(v)?;
                 }
                 Opcode::SetLocal => {
-                    let index = self.read_byte();
+                    let index = self.read_byte()?;
                     let fn_start_pointer = self.call_frame().fn_start_stack_index;
-                    self.stack[fn_start_pointer + index as usize] = self.peek_at(0).clone();
+                    self.stack[fn_start_pointer + index as usize] = self.peek_at(0)?.clone();
                 }
                 Opcode::JumpIfFalse => {
-                    let offset = self.read_short();
-                    if is_falsey(self.peek_at(0)) {
+                    let offset = self.read_short()?;
+                    if is_falsey(self.peek_at(0)?) {
                         self.increment_ip_by(offset);
                     }
                 }
                 Opcode::Jump => {
-                    let offset = self.read_short();
+                    let offset = self.read_short()?;
                     self.increment_ip_by(offset);
                 }
                 Opcode::JumpIfTrue => {
-                    let offset = self.read_short();
-                    if !is_falsey(self.peek_at(0)) {
+                    let offset = self.read_short()?;
+                    if !is_falsey(self.peek_at(0)?) {
                         self.increment_ip_by(offset);
                     }
                 }
                 Opcode::Loop => {
-                    let offset = self.read_short();
+                    let offset = self.read_short()?;
                     self.decrement_ip_by(offset);
                 }
                 Opcode::Call => {
-                    let arg_count = self.read_byte();
+                    let arg_count = self.read_byte()?;
                     self.call(arg_count)?;
                 }
                 Opcode::Closure => {
@@ -399,8 +422,8 @@ impl<'a> VirtualMachine<'a> {
                     match &*function {
                         Function::UserDefined(u) => {
                             for _ in 0..u.upvalue_count {
-                                let is_local = self.read_byte();
-                                let index = self.read_byte();
+                                let is_local = self.read_byte()?;
+                                let index = self.read_byte()?;
                                 if is_local > 0 {
                                     let upvalue_index_on_stack =
                                         current_fn_stack_ptr + index as usize;
@@ -408,31 +431,31 @@ impl<'a> VirtualMachine<'a> {
                                         self.capture_upvalue(upvalue_index_on_stack);
                                     closure.upvalues.push(captured_upvalue);
                                 } else {
-                                    let current_closure = self.current_closure();
+                                    let current_closure = self.current_closure()?;
                                     let upvalue = current_closure.upvalues[index as usize].clone();
                                     closure.upvalues.push(upvalue);
                                 }
                             }
                         }
                     }
-                    self.push(Value::Object(Object::Closure(closure)));
+                    self.push(Value::Object(Object::Closure(closure)))?;
                 }
                 Opcode::GetUpvalue => {
-                    let slot = self.read_byte();
-                    let closure = self.current_closure();
+                    let slot = self.read_byte()?;
+                    let closure = self.current_closure()?;
                     let value = {
                         let upvalue = (&*closure.upvalues[slot as usize]).borrow();
                         match &upvalue.location {
-                            Location::Stack(index) => self.stack[*index].clone(),
+                            Location::Stack(index) => self.get_stack(*index)?.clone(),
                             Location::Heap(shared_value) => shared_value.clone(),
                         }
                     };
-                    self.push(value);
+                    self.push(value)?;
                 }
                 Opcode::SetUpvalue => {
-                    let slot = self.read_byte();
-                    let value = self.peek_at(slot as usize).clone();
-                    let closure = self.current_closure();
+                    let slot = self.read_byte()?;
+                    let value = self.peek_at(slot as usize)?.clone();
+                    let closure = self.current_closure()?;
                     let upvalue = &closure.upvalues[slot as usize];
                     let mut upvalue = (&**upvalue).borrow_mut();
                     let location = &mut upvalue.location;
@@ -440,7 +463,7 @@ impl<'a> VirtualMachine<'a> {
                         Location::Stack(index) => {
                             let i = *index;
                             drop(upvalue);
-                            self.stack[i] = value
+                            self.set_stack_mut(i, value)?;
                         }
                         Location::Heap(shared_value) => {
                             let sv = &mut *shared_value;
@@ -449,31 +472,31 @@ impl<'a> VirtualMachine<'a> {
                     }
                 }
                 Opcode::CloseUpvalue => {
-                    self.close_upvalues(self.stack_top - 1);
+                    self.close_upvalues(self.stack_top - 1)?;
                     self.pop();
                 }
                 Opcode::Class => {
                     let class = self.read_string()?;
-                    self.push(Value::Object(Object::Class(Rc::new(Class::new(class)))))
+                    self.push(Value::Object(Object::Class(Rc::new(Class::new(class)))))?
                 }
                 Opcode::SetProperty => {
                     let property = self.read_string()?;
-                    let value = self.peek_at(0).clone();
-                    let instance = self.peek_at(1);
+                    let value = self.peek_at(0)?.clone();
+                    let instance = self.peek_at(1)?;
                     self.set_property(instance, property, value)?;
                     let value = self.pop();
                     self.pop();
-                    self.push(value);
+                    self.push(value)?;
                 }
                 Opcode::GetProperty => {
-                    let instance = self.peek_at(0);
+                    let instance = self.peek_at(0)?;
                     let property = self.read_str_without_increment()?;
                     let (value, method) = self.get_property(instance, property)?;
                     if let Some(method) = method {
-                        self.bind_method(value, method);
+                        self.bind_method(value, method)?;
                     } else {
                         self.pop(); // instance
-                        self.push(value);
+                        self.push(value)?;
                     }
                     self.increment_ip_by(1);
                 }
@@ -483,8 +506,8 @@ impl<'a> VirtualMachine<'a> {
                 }
                 Opcode::Invoke => {
                     let method = self.read_string()?;
-                    let arg_count = self.read_byte() as usize;
-                    let receiver = self.peek_at(arg_count);
+                    let arg_count = self.read_byte()? as usize;
+                    let receiver = self.peek_at(arg_count)?;
                     let fn_start_stack_index = self.stack_top - arg_count - 1;
                     match receiver {
                         Value::Object(Object::Receiver(v, _)) => {
@@ -494,7 +517,7 @@ impl<'a> VirtualMachine<'a> {
                                     let class = instance.class.clone();
                                     let (method, receiver) =
                                         self.get_method_and_receiver(class, receiver, &method)?;
-                                    self.stack[fn_start_stack_index] = receiver;
+                                    self.set_stack_mut(fn_start_stack_index, receiver)?;
                                     self.call_function(
                                         &method.function,
                                         arg_count,
@@ -508,7 +531,7 @@ impl<'a> VirtualMachine<'a> {
                             let class = instance.class.clone();
                             let (method, receiver) =
                                 self.get_method_and_receiver(class, receiver, &method)?;
-                            self.stack[fn_start_stack_index] = receiver;
+                            self.set_stack_mut(fn_start_stack_index, receiver)?;
                             self.call_function(&method.function, arg_count, fn_start_stack_index)?;
                         }
                         _ => bail!(self.runtime_error("Only instance can have methods")),
@@ -564,7 +587,7 @@ impl<'a> VirtualMachine<'a> {
                     drop(fields);
                     let class = instance.class.clone();
                     let method = self.get_method(class, property)?;
-                    let receiver = self.peek_at(0).clone(); // receiver
+                    let receiver = self.peek_at(0)?.clone(); // receiver
                     Ok((receiver, Some(method)))
                 }
             }
@@ -582,19 +605,20 @@ impl<'a> VirtualMachine<'a> {
         }
     }
 
-    fn bind_method(&mut self, receiver: Value, method: Rc<Closure>) {
+    fn bind_method(&mut self, receiver: Value, method: Rc<Closure>) -> Result<()> {
         let method_with_receiver = match receiver {
             Value::Object(Object::Receiver(r, _)) => Value::Object(Object::Receiver(r, method)),
             _ => Value::Object(Object::Receiver(Rc::new(receiver), method)),
         };
         self.pop(); // remove the instance
-        self.push(method_with_receiver);
+        self.push(method_with_receiver)?;
+        Ok(())
     }
 
     fn define_method(&mut self, method_name: String) -> Result<()> {
-        let method = self.peek_at(0).clone();
+        let method = self.peek_at(0)?.clone();
         match method {
-            Value::Object(Object::Closure(closure)) => match self.peek_at(1) {
+            Value::Object(Object::Closure(closure)) => match self.peek_at(1)? {
                 Value::Object(Object::Class(class)) => {
                     let mut methods = (*class.methods).borrow_mut();
                     methods.insert(method_name, Rc::new(closure));
@@ -622,23 +646,25 @@ impl<'a> VirtualMachine<'a> {
         s
     }
 
-    fn close_upvalues(&mut self, last_index: usize) {
+    fn close_upvalues(&mut self, last_index: usize) -> Result<()> {
         let upvalue_iter = self.up_values.iter().rev();
         let mut count = 0;
-        upvalue_iter
+        let _v: Result<()> = upvalue_iter
             .map(|u| (**u).borrow_mut())
             .take_while(|u| match &u.location {
                 Location::Stack(index) => *index >= last_index,
                 _ => false,
             })
-            .for_each(|mut u| {
+            .try_for_each(|mut u| {
                 count += 1;
                 if let Location::Stack(index) = u.location {
-                    let value = self.stack[index].clone();
+                    let value = self.get_stack(index)?.clone();
                     u.location = Location::Heap(value);
                 }
+                Ok(())
             });
         let _captured_values = self.up_values.split_off(self.up_values.len() - count);
+        Ok(())
     }
 
     fn capture_upvalue(&mut self, stack_index: usize) -> Shared<Upvalue> {
@@ -669,7 +695,7 @@ impl<'a> VirtualMachine<'a> {
 
     fn call(&mut self, arg_count: u8) -> Result<()> {
         let arg_count = arg_count as usize;
-        let value = self.peek_at(arg_count as usize);
+        let value = self.peek_at(arg_count)?;
         let start_index = self.stack_top - 1 - arg_count;
         match value {
             Value::Object(Object::Closure(c)) => {
@@ -681,24 +707,28 @@ impl<'a> VirtualMachine<'a> {
                 let methods = c.methods.clone();
                 let receiver = Value::Object(Object::Instance(Instance::new(class)));
                 if let Some(initializer) = (*methods).borrow().get("init") {
-                    self.stack[start_index] =
-                        Value::Object(Object::Receiver(Rc::new(receiver), initializer.clone()));
-                    // receiver;
+                    // set the receiver at start index for the constructor;
+                    self.set_stack_mut(
+                        start_index,
+                        Value::Object(Object::Receiver(Rc::new(receiver), initializer.clone())),
+                    )?;
                     self.call_function(&initializer.function, arg_count, start_index)?;
                 } else {
                     if arg_count != 0 {
                         bail!(self
                             .runtime_error(&format!("Expected 0  arguments but got {}", arg_count)))
                     }
-                    self.stack[start_index] = receiver;
+                    self.set_stack_mut(start_index, receiver)?;
                 }
                 Ok(())
             }
             Value::Object(Object::Receiver(receiver, closure)) => {
                 let receiver = receiver.clone();
                 let closure = closure.clone();
-                self.stack[start_index] =
-                    Value::Object(Object::Receiver(receiver, closure.clone()));
+                self.set_stack_mut(
+                    start_index,
+                    Value::Object(Object::Receiver(receiver, closure.clone())),
+                )?;
                 self.call_function(&closure.function, arg_count, start_index)
             }
             _ => bail!(self
@@ -735,7 +765,7 @@ impl<'a> VirtualMachine<'a> {
 
     #[inline]
     fn read_str_without_increment(&self) -> Result<&str> {
-        let constant = self.read_constant_at(self.ip());
+        let constant = self.read_constant_at(self.ip())?;
         match constant {
             Value::Object(Object::String(s)) => Ok(s),
             _ => Err(self.runtime_error("message").into()),
@@ -751,7 +781,7 @@ impl<'a> VirtualMachine<'a> {
 
     #[inline]
     fn read_function(&mut self) -> Result<Rc<Function>> {
-        let constant = self.read_constant();
+        let constant = self.read_constant()?;
         match constant {
             Value::Object(Object::Function(s)) => Ok(s),
             _ => bail!(self.runtime_error("Not a function")),
@@ -761,27 +791,37 @@ impl<'a> VirtualMachine<'a> {
     fn runtime_error(&self, message: &str) -> ErrorKind {
         let mut error_buf = vec![];
         writeln!(error_buf, "{}", message).expect("Write failed");
-        for frame in (&self.call_frames).iter().rev() {
+        let all_call_frames = (&self.call_frames).iter().rev();
+        for frame in all_call_frames {
             let stack_index = frame.fn_start_stack_index;
-            let function = &*self.closure_from_stack(stack_index).function;
-            let fun_name = &function.to_string();
-            match &*function {
-                Function::UserDefined(u) => {
-                    let ip = frame.ip;
-                    let line_num = u.chunk.lines[ip];
-                    writeln!(error_buf, "[line {}] in {}", line_num, fun_name)
-                        .expect("Write failed")
-                }
-            };
+            if let Ok(closure) = self.closure_from_stack(stack_index) {
+                let function = &*closure.function;
+                let fun_name = &function.to_string();
+                match &*function {
+                    Function::UserDefined(u) => {
+                        let ip = frame.ip;
+                        let line_num = u.chunk.lines[ip];
+                        writeln!(error_buf, "[line {}] in {}", line_num, fun_name)
+                            .expect("Write failed")
+                    }
+                };
+            }
         }
-        let line = self.current_chunk().lines[self.ip()];
-        runtime_vm_error(line, &utf8_to_string(&error_buf))
+        if let Ok(chunk) = self.current_chunk() {
+            let line = chunk.lines[self.ip()];
+            runtime_vm_error(line, &utf8_to_string(&error_buf))
+        } else {
+            ErrorKind::RuntimeError(format!(
+                "VM BUG Unable to detect line number, message: {}",
+                &utf8_to_string(&error_buf)
+            ))
+        }
     }
 
     #[inline]
-    fn peek_at(&self, distance: usize) -> &Value {
+    fn peek_at(&self, distance: usize) -> Result<&Value> {
         let top = self.stack_top;
-        &self.stack[top - 1 - distance]
+        self.get_stack(top - 1 - distance)
     }
 
     #[inline]
@@ -793,7 +833,7 @@ impl<'a> VirtualMachine<'a> {
 
     #[inline]
     fn binary_op(&mut self, op: fn(f64, f64) -> Value) -> Result<()> {
-        let (left, right) = (self.peek_at(1), self.peek_at(0));
+        let (left, right) = (self.peek_at(1)?, self.peek_at(0)?);
         let (left, right) = match (left, right) {
             (Value::Number(l), Value::Number(r)) => (*l, *r),
             _ => bail!(self.runtime_error("Can perform binary operations only on numbers.")),
@@ -802,21 +842,21 @@ impl<'a> VirtualMachine<'a> {
     }
 
     fn add(&mut self) -> Result<()> {
-        match (self.peek_at(1), self.peek_at(0)) {
+        match (self.peek_at(1)?, self.peek_at(0)?) {
             (Value::Object(Object::String(left)), Value::Object(Object::String(right))) => {
                 let mut concatenated_string = String::new();
                 concatenated_string.push_str(left);
                 concatenated_string.push_str(right);
                 self.pop();
                 self.pop();
-                self.push(Value::Object(Object::String(concatenated_string)));
+                self.push(Value::Object(Object::String(concatenated_string)))?;
                 Ok(())
             }
             (Value::Number(_), Value::Number(_)) => self.binary_op(|a, b| Value::Number(a + b)),
             _ => bail!(self.runtime_error(&format!(
                 "Add can be perfomed only on numbers or strings, got {} and {}",
-                self.peek_at(1),
-                self.peek_at(0)
+                self.peek_at(1)?,
+                self.peek_at(0)?
             ))),
         }
     }
@@ -831,14 +871,21 @@ impl<'a> VirtualMachine<'a> {
         let result = op(left, right);
         self.pop();
         self.pop();
-        self.push(result);
+        self.push(result)?;
         Ok(())
     }
 
     #[inline]
-    fn push(&mut self, value: Value) {
+    fn push(&mut self, value: Value) -> Result<()> {
+        if self.stack_top == STACK_SIZE {
+            bail!(self.runtime_error(&format!(
+                "Stack overflow, stack size = {}, index = {}",
+                STACK_SIZE, self.stack_top
+            )));
+        }
         self.stack[self.stack_top] = value;
         self.stack_top += 1;
+        Ok(())
     }
     #[inline]
     fn pop(&mut self) -> Value {
@@ -902,7 +949,7 @@ mod tests {
     #[allow(unused_imports)]
     use crate::errors::*;
 
-    use super::VirtualMachine;
+    use super::{VirtualMachine, STACK_SIZE};
 
     #[test]
     fn vm_numeric_expressions() -> Result<()> {
@@ -1359,6 +1406,35 @@ mod tests {
                 assert_eq!("[Parse Error] [line: 6] Error at <2>: message: Can't return a value from an initializer\n", utf8_to_string(&buf))
             }
             Ok(_) => panic!("This test is expected to fail"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn vm_stack_overflow() -> Result<()> {
+        let mut buf = vec![];
+        let mut vm = VirtualMachine::new_with_writer(Some(&mut buf));
+        let source = r#"
+        fun infinite_recursion() {
+            infinite_recursion();
+        }
+
+        infinite_recursion();
+        "#;
+        let mut expected = format!(
+            "[Runtime Error] Line: 3, message: Stack overflow, stack size = {}, index = {}\n",
+            STACK_SIZE, STACK_SIZE
+        );
+        for _ in 0..(STACK_SIZE - 1) {
+            expected.push_str("[line 3] in <fn infinite_recursion>\n");
+        }
+        expected.push_str("[line 6] in <fn script>\n\n");
+        match vm.interpret(source.to_string()) {
+            Ok(_) => panic!("This test is expected to fail"),
+            Err(e) => {
+                print_error(e, &mut buf);
+                assert_eq!(expected, utf8_to_string(&buf))
+            }
         }
         Ok(())
     }
