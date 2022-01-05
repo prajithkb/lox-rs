@@ -966,7 +966,7 @@ impl<'a> Compiler<'a> {
             self.current_chunk()
                 .disassemble_chunk_with_writer(name, writer);
             self.custom_writer = writer_opt;
-        } else if log_enabled!(log::Level::Trace) {
+        } else if log_enabled!(log::Level::Info) {
             self.current_chunk()
                 .disassemble_chunk_with_writer(name, &mut stdout());
         }

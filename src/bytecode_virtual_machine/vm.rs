@@ -7,7 +7,7 @@ use std::ops::Range;
 use std::rc::Rc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use log::{info, log_enabled, trace, Level};
+use log::{error, info, log_enabled, trace, Level};
 
 use crate::bytecode_virtual_machine::chunk::Chunk;
 use crate::bytecode_virtual_machine::compiler::Compiler;
@@ -337,6 +337,7 @@ impl<'a> VirtualMachine<'a> {
                 Opcode::Negate => {
                     if let Value::Number(v) = self.peek_at(0)? {
                         let result = Value::Number(-v);
+                        self.pop();
                         self.push(result)?;
                     } else {
                         bail!(self.runtime_error("Can only negate numbers."));
@@ -759,8 +760,11 @@ impl<'a> VirtualMachine<'a> {
                 let f = &*f.clone();
                 self.call_function(f, arg_count, start_index)
             }
-            _ => bail!(self
-                .runtime_error("can only call a function/closure, constructor or a class method")),
+            _ => bail!(self.runtime_error(&format!(
+                "can only call a function/closure, constructor or a class method, got '{}', at stack index {}",
+                value, 
+                self.stack_top - 1 - arg_count
+            ))),
         }
     }
 
@@ -865,6 +869,18 @@ impl<'a> VirtualMachine<'a> {
                     Function::Native(_) => todo!(),
                 };
             }
+        }
+        if self.stack_top < STACK_SIZE {
+            // We print stack only if it is not stack overflow
+            error!(
+                "Current function= {}, ip ={}, stack ={:?}",
+                &self
+                    .current_function()
+                    .map(|f| f.to_string())
+                    .unwrap_or_default(),
+                self.ip(),
+                self.sanitized_stack(0..self.stack_top, false)
+            );
         }
         if let Ok(chunk) = self.current_chunk() {
             let line = chunk.lines[self.ip()];
