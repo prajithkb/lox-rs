@@ -32,10 +32,20 @@ pub enum LoxRunType {
 impl<'a> Lox<'a> {
     #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
-        Lox {
-            interpreter: Interpreter::new(),
-            vm: VirtualMachine::new(),
-        }
+        let mut interpreter = Interpreter::new();
+        let mut vm = VirtualMachine::new();
+        crate::tree_walk_interpreter::interpreter::define_native_fn(
+            "clock".to_string(),
+            &mut interpreter,
+            Interpreter::clock(),
+        );
+        crate::bytecode_virtual_machine::vm::define_native_fn(
+            "clock".to_string(),
+            0,
+            &mut vm,
+            VirtualMachine::clock(),
+        );
+        Lox { interpreter, vm }
     }
 
     pub fn run_script(&mut self, path: &str, run_type: LoxRunType) -> Result<()> {

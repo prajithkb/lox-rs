@@ -455,6 +455,7 @@ impl<'a> Compiler<'a> {
         while self.current().token_type != TokenType::RightParen {
             match &mut self.state.function {
                 Function::UserDefined(u) => u.arity += 1,
+                Function::Native(_) => todo!(),
             }
             let constant = self.parse_variable("Expect parameter name")?;
             self.define_variable(constant);
@@ -586,6 +587,7 @@ impl<'a> Compiler<'a> {
                 u.upvalue_count += 1;
                 (u.upvalue_count - 1) as u8
             }
+            Function::Native(_) => todo!(),
         }
     }
 
@@ -1059,6 +1061,7 @@ impl<'a> Compiler<'a> {
     fn current_chunk_mut(&mut self) -> &mut Chunk {
         match &mut self.state.function {
             Function::UserDefined(u) => &mut u.chunk,
+            Function::Native(_) => todo!(),
         }
     }
 
@@ -1066,6 +1069,7 @@ impl<'a> Compiler<'a> {
     fn current_chunk(&self) -> &Chunk {
         match &self.state.function {
             Function::UserDefined(u) => &u.chunk,
+            Function::Native(_) => todo!(),
         }
     }
 
@@ -1151,7 +1155,7 @@ fn as_two_bytes(jump: usize) -> (u8, u8) {
 #[cfg(test)]
 mod tests {
     use crate::bytecode_virtual_machine::compiler::FunctionType;
-    use crate::bytecode_virtual_machine::objects::Function::UserDefined;
+    use crate::bytecode_virtual_machine::objects::Function::{Native, UserDefined};
     use crate::{common::lox::utf8_to_string, common::scanner::Scanner, errors::*};
 
     use super::Compiler;
@@ -1166,6 +1170,7 @@ mod tests {
         let mut buf = vec![];
         match &function {
             UserDefined(u) => u.chunk.disassemble_chunk_with_writer("test", &mut buf),
+            Native(_) => todo!(),
         }
         assert_eq!(
             r#"== test ==
@@ -1189,6 +1194,7 @@ mod tests {
         let mut buf = vec![];
         match &function {
             UserDefined(u) => u.chunk.disassemble_chunk_with_writer("test", &mut buf),
+            Native(_) => todo!(),
         }
         assert_eq!(
             r#"== test ==
@@ -1212,6 +1218,7 @@ mod tests {
         let mut buf = vec![];
         match &function {
             UserDefined(u) => u.chunk.disassemble_chunk_with_writer("test", &mut buf),
+            Native(_) => todo!(),
         }
         assert_eq!(
             r#"== test ==
@@ -1236,6 +1243,7 @@ mod tests {
         let mut buf = vec![];
         match &function {
             UserDefined(u) => u.chunk.disassemble_chunk_with_writer("test", &mut buf),
+            Native(_) => todo!(),
         }
         assert_eq!(
             r#"== test ==
@@ -1263,6 +1271,7 @@ mod tests {
         let mut buf = vec![];
         match &function {
             UserDefined(u) => u.chunk.disassemble_chunk_with_writer("test", &mut buf),
+            Native(_) => todo!(),
         }
         assert_eq!(
             r#"== test ==
@@ -1296,6 +1305,7 @@ mod tests {
         let mut buf = vec![];
         match &function {
             UserDefined(u) => u.chunk.disassemble_chunk_with_writer("test", &mut buf),
+            Native(_) => todo!(),
         }
         assert_eq!(
             r#"== test ==
@@ -1321,6 +1331,7 @@ mod tests {
         let mut buf = vec![];
         match &function {
             UserDefined(u) => u.chunk.disassemble_chunk_with_writer("test", &mut buf),
+            Native(_) => todo!(),
         }
         assert_eq!(
             r#"== test ==
@@ -1346,6 +1357,7 @@ mod tests {
         let mut buf = vec![];
         match &function {
             UserDefined(u) => u.chunk.disassemble_chunk_with_writer("test", &mut buf),
+            Native(_) => todo!(),
         }
         assert_eq!(
             r#"== test ==
@@ -1382,6 +1394,7 @@ mod tests {
             UserDefined(u) => {
                 u.chunk.disassemble_chunk_with_writer("test", &mut buf);
             }
+            Native(_) => todo!(),
         }
         assert_eq!(
             r#"== test ==
@@ -1426,6 +1439,7 @@ mod tests {
         let mut buf = vec![];
         match &function {
             UserDefined(u) => u.chunk.disassemble_chunk_with_writer("test", &mut buf),
+            Native(_) => todo!(),
         }
         assert_eq!(
             r#"== test ==
@@ -1466,6 +1480,7 @@ mod tests {
         let mut buf = vec![];
         match &function {
             UserDefined(u) => u.chunk.disassemble_chunk_with_writer("test", &mut buf),
+            Native(_) => todo!(),
         }
         assert_eq!(
             r#"== test ==
@@ -1490,6 +1505,7 @@ mod tests {
         let mut buf = vec![];
         match &function {
             UserDefined(u) => u.chunk.disassemble_chunk_with_writer("test", &mut buf),
+            Native(_) => todo!(),
         }
         assert_eq!(
             r#"== test ==
@@ -1522,6 +1538,7 @@ mod tests {
         let mut buf = vec![];
         match &function {
             UserDefined(u) => u.chunk.disassemble_chunk_with_writer("test", &mut buf),
+            Native(_) => todo!(),
         }
         assert_eq!(
             r#"== test ==
@@ -1568,6 +1585,7 @@ mod tests {
             UserDefined(u) => {
                 u.chunk.disassemble_chunk_with_writer("test", &mut buf);
             }
+            Native(_) => todo!(),
         }
         assert_eq!(
             r#"== test ==
@@ -1602,6 +1620,7 @@ mod tests {
             UserDefined(u) => {
                 u.chunk.disassemble_chunk_with_writer("test", &mut buf);
             }
+            Native(_) => todo!(),
         }
         assert_eq!(
             r#"== test ==

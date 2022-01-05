@@ -5,7 +5,7 @@ use std::io::{stdout, Write};
 use std::mem::{self, MaybeUninit};
 use std::ops::Range;
 use std::rc::Rc;
-use std::time::Instant;
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use log::{info, log_enabled, trace, Level};
 
@@ -19,6 +19,8 @@ use crate::common::lox::{utf8_to_string, Shared, Writer};
 use crate::common::scanner::Scanner;
 use crate::common::tokens::pretty_print;
 use crate::errors::*;
+
+use super::objects::{NativeFn, NativeFunction};
 
 const STACK_SIZE: usize = 1024;
 
@@ -35,6 +37,15 @@ impl CallFrame {
             ip: 0,
         }
     }
+}
+
+pub fn define_native_fn(name: String, arity: usize, vm: &mut VirtualMachine, native_fn: NativeFn) {
+    vm.runtime_values.insert(
+        name.clone(),
+        Value::Object(Object::Function(Rc::new(Function::Native(
+            NativeFunction::new(name, arity, native_fn),
+        )))),
+    );
 }
 
 pub struct VirtualMachine<'a> {
@@ -95,6 +106,17 @@ impl<'a> VirtualMachine<'a> {
             // up_values_in_stack: LinkedList::new(),
             custom_writer,
         }
+    }
+
+    pub fn clock() -> NativeFn {
+        Rc::new(|_| {
+            let start = SystemTime::now();
+            let since_the_epoch = start
+                .duration_since(UNIX_EPOCH)
+                .expect("Time went backwards")
+                .as_secs_f64();
+            Value::Number(since_the_epoch)
+        })
     }
 
     pub fn interpret(&mut self, source: String) -> Result<()> {
@@ -198,6 +220,7 @@ impl<'a> VirtualMachine<'a> {
         let function = self.current_function()?;
         match function {
             Function::UserDefined(u) => Ok(&u.chunk),
+            Function::Native(_) => todo!(),
         }
     }
 
@@ -437,6 +460,7 @@ impl<'a> VirtualMachine<'a> {
                                 }
                             }
                         }
+                        Function::Native(_) => todo!(),
                     }
                     self.push(Value::Object(Object::Closure(closure)))?;
                 }
@@ -731,6 +755,10 @@ impl<'a> VirtualMachine<'a> {
                 )?;
                 self.call_function(&closure.function, arg_count, start_index)
             }
+            Value::Object(Object::Function(f)) => {
+                let f = &*f.clone();
+                self.call_function(f, arg_count, start_index)
+            }
             _ => bail!(self
                 .runtime_error("can only call a function/closure, constructor or a class method")),
         }
@@ -744,14 +772,44 @@ impl<'a> VirtualMachine<'a> {
     ) -> Result<()> {
         let frame = CallFrame::new(fn_start_stack_index);
         self.check_arguments(function, arg_count)?;
-        self.call_frames.push(frame);
+        if let Function::Native(n) = function {
+            self.call_native_function(n, arg_count, fn_start_stack_index)?;
+        } else {
+            self.call_frames.push(frame);
+        }
         Ok(())
     }
+
+    fn call_native_function(
+        &mut self,
+        native_function: &NativeFunction,
+        arg_count: usize,
+        fn_start_stack_index: usize,
+    ) -> Result<()> {
+        let result = native_function.call(vec![]);
+        let mut arguments = Vec::new();
+        for i in 0..arg_count {
+            arguments.push(std::mem::take(&mut self.stack[fn_start_stack_index + i]));
+        }
+        self.stack_top = fn_start_stack_index + 1;
+        self.set_stack_mut(fn_start_stack_index, result)?;
+        Ok(())
+    }
+
     #[inline]
     fn check_arguments(&mut self, function: &Function, arg_count: usize) -> Result<bool> {
         match function {
             Function::UserDefined(u) => {
                 let arity = u.arity;
+                if arity != arg_count {
+                    bail!(self.runtime_error(&format!(
+                        "Expected {} arguments but got {}",
+                        arity, arg_count
+                    )))
+                }
+            }
+            Function::Native(n) => {
+                let arity = n.arity;
                 if arity != arg_count {
                     bail!(self.runtime_error(&format!(
                         "Expected {} arguments but got {}",
@@ -804,6 +862,7 @@ impl<'a> VirtualMachine<'a> {
                         writeln!(error_buf, "[line {}] in {}", line_num, fun_name)
                             .expect("Write failed")
                     }
+                    Function::Native(_) => todo!(),
                 };
             }
         }
@@ -949,7 +1008,7 @@ mod tests {
     #[allow(unused_imports)]
     use crate::errors::*;
 
-    use super::{VirtualMachine, STACK_SIZE};
+    use super::{define_native_fn, VirtualMachine, STACK_SIZE};
 
     #[test]
     fn vm_numeric_expressions() -> Result<()> {
@@ -1436,6 +1495,21 @@ mod tests {
                 assert_eq!(expected, utf8_to_string(&buf))
             }
         }
+        Ok(())
+    }
+
+    #[test]
+    fn vm_native_clock() -> Result<()> {
+        let mut buf = vec![];
+        let mut vm = VirtualMachine::new_with_writer(Some(&mut buf));
+        let source = r#"
+        print clock();
+        "#;
+        define_native_fn("clock".to_string(), 0, &mut vm, VirtualMachine::clock());
+        let _ = vm.interpret(source.to_string())?;
+        let output = utf8_to_string(&buf);
+        // This will fail if it is not f64
+        let _ = output.trim().parse::<f64>().unwrap();
         Ok(())
     }
 }

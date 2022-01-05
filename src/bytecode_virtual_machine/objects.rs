@@ -153,6 +153,7 @@ pub fn shared<T>(v: T) -> Shared<T> {
 #[derive(Debug, Clone)]
 pub enum Function {
     UserDefined(UserDefinedFunction),
+    Native(NativeFunction),
 }
 
 impl Display for Function {
@@ -165,7 +166,40 @@ impl Display for Function {
                 }
                 f.write_str(&format!("<fn {}>", name))
             }
+            Function::Native(n) => f.write_str(&format!("<native fn {}>", n.name)),
         }
+    }
+}
+
+pub type NativeFn = Rc<dyn Fn(Vec<Value>) -> Value>;
+
+#[derive(Clone)]
+pub struct NativeFunction {
+    pub name: String,
+    pub arity: usize,
+    pub function: NativeFn,
+}
+
+impl std::fmt::Debug for NativeFunction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativeFunction")
+            .field("arg_count", &self.arity)
+            .finish()
+    }
+}
+
+impl NativeFunction {
+    pub fn new(name: String, arity: usize, function: NativeFn) -> Self {
+        NativeFunction {
+            name,
+            arity,
+            function,
+        }
+    }
+
+    pub fn call(&self, arguments: Vec<Value>) -> Value {
+        let function = self.function.clone();
+        function(arguments)
     }
 }
 

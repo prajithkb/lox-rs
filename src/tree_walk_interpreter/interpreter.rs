@@ -154,6 +154,23 @@ impl Environment {
     }
 }
 
+pub fn define_native_fn(
+    name: String,
+    interpreter: &mut Interpreter,
+    native_fn: InnerNativeFunction,
+) {
+    let v = interpreter.globals.clone();
+    interpreter.environment().define(
+        name.clone(),
+        Value::Function(Rc::new(LoxFunction::Native(
+            name.clone(),
+            vec![],
+            Rc::new(RefCell::new(NativeFunction::new(name, native_fn))),
+            v,
+        ))),
+    );
+}
+
 pub struct Interpreter<'a> {
     #[allow(unused)]
     globals: Shared<Environment>,
@@ -168,7 +185,7 @@ impl<'a> Interpreter<'a> {
         Interpreter::new_with_writer(None)
     }
 
-    fn clock() -> InnerNativeFunction {
+    pub fn clock() -> InnerNativeFunction {
         Box::new(|_, _| {
             let start = SystemTime::now();
             let since_the_epoch = start
@@ -181,25 +198,12 @@ impl<'a> Interpreter<'a> {
 
     fn new_with_writer(output_writer: Option<&'a mut dyn Write>) -> Self {
         let globals = Rc::new(RefCell::new(Environment::new(None)));
-        let mut interpreter = Interpreter {
+        Interpreter {
             globals: globals.clone(),
-            environment: globals.clone(),
+            environment: globals,
             output_writer,
             locals: HashMap::new(),
-        };
-        interpreter.environment().define(
-            "clock".into(),
-            Value::Function(Rc::new(LoxFunction::Native(
-                "clock".into(),
-                vec![],
-                Rc::new(RefCell::new(NativeFunction::new(
-                    "clock".into(),
-                    Interpreter::clock(),
-                ))),
-                globals,
-            ))),
-        );
-        interpreter
+        }
     }
 
     fn environment(&mut self) -> RefMut<Environment> {
@@ -904,7 +908,7 @@ mod tests {
     };
     use std::{cell::RefCell, f64::EPSILON, rc::Rc};
 
-    use super::{Environment, Interpreter, Value};
+    use super::{define_native_fn, Environment, Interpreter, Value};
 
     fn evaluate_expression_statement(
         interpreter: &mut Interpreter,
@@ -1270,6 +1274,7 @@ outer variable set to inner variable
         let locals = resolver.resolve(&statements)?;
         let mut buf = vec![];
         let mut interpreter = Interpreter::new_with_writer(Some(&mut buf));
+        define_native_fn("clock".to_string(), &mut interpreter, Interpreter::clock());
         interpreter.interpret(&statements, locals)?;
         let output = utf8_to_string(&buf);
         // This will fail if it is not f64

@@ -128,23 +128,21 @@ pub fn closure_instruction(
     let v = &*chunk.constants.read_item_at(constant as usize);
     if let Value::Object(Object::Function(c)) = v {
         let function = &**c;
-        match function {
-            Function::UserDefined(u) => {
-                for _ in 0..u.upvalue_count {
-                    let is_local = *chunk.code.read_item_at(offset);
-                    offset += 1;
-                    let index = *chunk.code.read_item_at(offset);
-                    offset += 1;
-                    writeln!(
-                        writer,
-                        "{:04}    |{:>38}{} {}",
-                        offset - 2,
-                        "",
-                        if is_local == 1 { "local" } else { "upvalue" },
-                        index
-                    )
-                    .expect("Write failed");
-                }
+        if let Function::UserDefined(u) = function {
+            for _ in 0..u.upvalue_count {
+                let is_local = *chunk.code.read_item_at(offset);
+                offset += 1;
+                let index = *chunk.code.read_item_at(offset);
+                offset += 1;
+                writeln!(
+                    writer,
+                    "{:04}    |{:>38}{} {}",
+                    offset - 2,
+                    "",
+                    if is_local == 1 { "local" } else { "upvalue" },
+                    index
+                )
+                .expect("Write failed");
             }
         }
     }
