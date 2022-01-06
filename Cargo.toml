@@ -12,5 +12,8 @@ error-chain = "0.12.4"
 log = "0.4.0"
 num_enum = "0.5.4"
 
+[dev-dependencies]
+cli-table = "0.4.6"
+
 [profile.release]
 debug = true
