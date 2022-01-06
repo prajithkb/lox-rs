@@ -1,4 +1,5 @@
 use cli_table::{print_stdout, Cell, Color, Style, Table};
+use error_chain::bail;
 use lox_rs::errors::*;
 use std::{ffi::OsStr, fs, path::Path, process::Command, time::Instant};
 
@@ -14,6 +15,7 @@ const VM_PATH: &str = "/Users/kprajith/workspace/rust/lox-rs/target/release/lox-
 #[test]
 fn perf_timings() -> Result<()> {
     println!("This test runs the bench mark tests and compares the timing (performance) between clox and vm.\nIt does not assert on anything yet.\n");
+    cargo_build_release()?;
     let dir_path = Path::new(TEST_CASE_PATH);
     let mut entries: Vec<_> = fs::read_dir(dir_path)?.collect();
     entries.sort_by(|a, b| {
@@ -22,8 +24,11 @@ fn perf_timings() -> Result<()> {
         a.file_name().cmp(&b.file_name())
     });
     let mut table = vec![];
-    // let _ = entries.split_off(1);
-    for entry in entries {
+    let allow_listed_entries = entries.into_iter().filter(|e| {
+        [OsStr::new("string_equality.lox").to_os_string()]
+            .contains(&e.as_ref().unwrap().file_name())
+    });
+    for entry in allow_listed_entries {
         let e = entry?;
         if e.file_type()?.is_file() {
             let file_name = String::from(e.file_name().to_string_lossy());
@@ -59,7 +64,7 @@ fn perf_timings() -> Result<()> {
         ])
         .bold(true);
 
-    println!("Final results: Green is good (vm is faster than clox), bold is bad (vm is slower than clox");
+    println!("\nFinal results:");
     print_stdout(table)?;
     Ok(())
 }
@@ -86,8 +91,8 @@ fn run(
     command.arg(path_to_file);
     let start_time = Instant::now();
     let output = command.output()?;
-    let stdout = std::str::from_utf8(&output.stdout).map_err(|_| ErrorKind::Msg("".into()))?;
-    let stderr = std::str::from_utf8(&output.stderr).map_err(|_| ErrorKind::Msg("".into()))?;
+    let stdout = std::str::from_utf8(&output.stdout).map_err(|e| ErrorKind::Msg(e.to_string()))?;
+    let stderr = std::str::from_utf8(&output.stderr).map_err(|e| ErrorKind::Msg(e.to_string()))?;
     println!(
         "RAN  {:?}{}{:?}",
         path_to_executable,
@@ -99,5 +104,31 @@ fn run(
     println!("STDOUT:{}", stdout);
     println!("STDERR:{}", stderr);
     println!("---------------------------------");
-    Ok(start_time.elapsed().as_secs_f64())
+    if !output.status.success() {
+        bail!("Error")
+    } else {
+        Ok(start_time.elapsed().as_secs_f64())
+    }
+}
+
+fn cargo_build_release() -> Result<()> {
+    let cargo_run_release = Command::new("cargo")
+        .arg("build")
+        .arg("--release")
+        .output()?;
+    if !cargo_run_release.status.success() {
+        println!(
+            "{}",
+            std::str::from_utf8(&cargo_run_release.stderr)
+                .map_err(|e| ErrorKind::Msg(e.to_string()))?
+        );
+        bail!("Error running cargo")
+    } else {
+        println!(
+            "{}",
+            std::str::from_utf8(&cargo_run_release.stdout)
+                .map_err(|e| ErrorKind::Msg(e.to_string()))?
+        );
+        Ok(())
+    }
 }

@@ -4,6 +4,8 @@ use crate::common::lox::Shared;
 
 use super::chunk::Chunk;
 
+pub type Byte = u8;
+
 #[derive(Debug, Clone)]
 pub enum Value {
     Unitialized,

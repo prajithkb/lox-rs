@@ -17,7 +17,7 @@ use crate::{
 use super::{
     chunk::Chunk,
     instructions::Opcode,
-    objects::{Function, Object, UserDefinedFunction, Value},
+    objects::{Byte, Function, Object, UserDefinedFunction, Value},
 };
 
 fn parse_error(token: &Token, message: &str) -> ErrorKind {
@@ -84,12 +84,12 @@ impl<'a> ParseRule<'a> {
 }
 #[derive(Debug)]
 struct Upvalue {
-    index: u8,
+    index: Byte,
     is_local: bool,
 }
 
 impl Upvalue {
-    pub fn new(index: u8, is_local: bool) -> Self {
+    pub fn new(index: Byte, is_local: bool) -> Self {
         Upvalue { index, is_local }
     }
 }
@@ -545,7 +545,7 @@ impl<'a> Compiler<'a> {
         Ok(())
     }
 
-    fn resolve_upvalue(&mut self, name: &Token) -> Result<Option<u8>> {
+    fn resolve_upvalue(&mut self, name: &Token) -> Result<Option<Byte>> {
         let state_iterator = self.states.iter_mut().rev();
         Compiler::resolve_upvalue_with_state(&mut self.state, state_iterator, name)
     }
@@ -554,7 +554,7 @@ impl<'a> Compiler<'a> {
         current: &mut State,
         mut state_iter: Rev<IterMut<State>>,
         name: &Token,
-    ) -> Result<Option<u8>> {
+    ) -> Result<Option<Byte>> {
         if let Some(enclosing) = state_iter.next() {
             if let Some(index) = Compiler::resolve_local_with_state(name, enclosing)? {
                 let local = &mut enclosing.scope.locals[index as usize];
@@ -572,7 +572,7 @@ impl<'a> Compiler<'a> {
         }
     }
 
-    fn add_upvalue(index: u8, state: &mut State, is_local: bool) -> u8 {
+    fn add_upvalue(index: Byte, state: &mut State, is_local: bool) -> Byte {
         match &mut state.function {
             Function::UserDefined(u) => {
                 if let Some((i, _)) = state
@@ -581,17 +581,17 @@ impl<'a> Compiler<'a> {
                     .enumerate()
                     .find(|(_, v)| v.is_local == is_local && v.index == index)
                 {
-                    return i as u8;
+                    return i as Byte;
                 }
                 state.upvalues.push(Upvalue::new(index, is_local));
                 u.upvalue_count += 1;
-                (u.upvalue_count - 1) as u8
+                (u.upvalue_count - 1) as Byte
             }
             Function::Native(_) => todo!(),
         }
     }
 
-    fn resolve_local_with_state(name: &Token, state: &State) -> Result<Option<u8>> {
+    fn resolve_local_with_state(name: &Token, state: &State) -> Result<Option<Byte>> {
         let scope = &state.scope;
         let mut i = scope.locals.len() as i32 - 1;
         while i >= 0 {
@@ -603,18 +603,18 @@ impl<'a> Compiler<'a> {
                         "Can't read local variable in its own initializer"
                     ))
                 }
-                return Ok(Some(i as u8));
+                return Ok(Some(i as Byte));
             }
             i -= 1;
         }
         Ok(None)
     }
 
-    fn resolve_local(&self, name: &Token) -> Result<Option<u8>> {
+    fn resolve_local(&self, name: &Token) -> Result<Option<Byte>> {
         Compiler::resolve_local_with_state(name, &self.state)
     }
 
-    fn define_variable(&mut self, byte: u8) {
+    fn define_variable(&mut self, byte: Byte) {
         if self.current_scope_mut().depth == GLOBAL_SCOPE_DEPTH {
             self.emit_opcode_and_bytes(Opcode::DefineGlobal, byte);
         } else {
@@ -903,7 +903,7 @@ impl<'a> Compiler<'a> {
         self.variable_usage(false)
     }
 
-    fn argument_list(&mut self) -> Result<u8> {
+    fn argument_list(&mut self) -> Result<Byte> {
         let mut count = 0;
         while self.current().token_type != TokenType::RightParen {
             self.expression()?;
@@ -953,7 +953,7 @@ impl<'a> Compiler<'a> {
     }
 
     #[inline]
-    fn add_constant(&mut self, value: Value) -> u8 {
+    fn add_constant(&mut self, value: Value) -> Byte {
         self.current_chunk_mut().add_constant(value)
     }
 
@@ -982,7 +982,7 @@ impl<'a> Compiler<'a> {
         self.emit_op_code(Opcode::Return);
     }
 
-    fn parse_variable(&mut self, message: &str) -> Result<u8> {
+    fn parse_variable(&mut self, message: &str) -> Result<Byte> {
         self.consume_next_token(TokenType::Identifier, message)?;
         self.declare_local_variable()?;
         if self.current_scope_mut().depth > GLOBAL_SCOPE_DEPTH {
@@ -1027,7 +1027,7 @@ impl<'a> Compiler<'a> {
             Some(self.current_scope_mut().depth);
     }
 
-    fn identifier_constant(&mut self, mut token: Token) -> Result<u8> {
+    fn identifier_constant(&mut self, mut token: Token) -> Result<Byte> {
         let literal = token.literal.take();
         if let Literal::Identifier(s) = literal.expect("Expect string") {
             let name = Value::Object(Object::String(s));
@@ -1043,7 +1043,7 @@ impl<'a> Compiler<'a> {
     }
 
     #[inline]
-    fn emit_byte(&mut self, byte: u8) {
+    fn emit_byte(&mut self, byte: Byte) {
         let mut line = 0;
         if self.token_index != 0 {
             line = self.previous().line;
@@ -1052,7 +1052,7 @@ impl<'a> Compiler<'a> {
     }
 
     #[inline]
-    fn emit_opcode_and_bytes(&mut self, op_code: Opcode, byte: u8) {
+    fn emit_opcode_and_bytes(&mut self, op_code: Opcode, byte: Byte) {
         self.emit_op_code(op_code);
         self.emit_byte(byte);
     }
@@ -1146,9 +1146,9 @@ impl<'a> Compiler<'a> {
 }
 
 #[inline]
-fn as_two_bytes(jump: usize) -> (u8, u8) {
-    let first = ((jump >> 8) & 0xff) as u8;
-    let second = (jump & 0xff) as u8;
+fn as_two_bytes(jump: usize) -> (Byte, Byte) {
+    let first = ((jump >> 8) & 0xff) as Byte;
+    let second = (jump & 0xff) as Byte;
     (first, second)
 }
 

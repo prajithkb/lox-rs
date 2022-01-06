@@ -1,10 +1,13 @@
 use std::io::{stdout, Write};
 
-use super::{instructions, objects::Value};
+use super::{
+    instructions,
+    objects::{Byte, Value},
+};
 
 #[derive(Debug, Clone)]
 pub struct Chunk {
-    pub code: Memory<u8>,
+    pub code: Memory<Byte>,
     pub constants: Memory<Value>,
     pub lines: Vec<usize>,
 }
@@ -24,11 +27,11 @@ impl Chunk {
         }
     }
 
-    pub fn add_constant(&mut self, value: Value) -> u8 {
+    pub fn add_constant(&mut self, value: Value) -> Byte {
         self.constants.write_item(value);
         // /After we add the constant, we return the index where the constant was appended
         // so that we can locate that same constant later.
-        (self.constants.count - 1) as u8
+        (self.constants.count - 1) as Byte
     }
 
     #[inline]
@@ -65,7 +68,7 @@ impl Chunk {
         instructions::disassemble_instruction(byte, self, offset, writer)
     }
 
-    pub fn write_chunk(&mut self, byte: u8, line: usize) {
+    pub fn write_chunk(&mut self, byte: Byte, line: usize) {
         self.code.write_item(byte);
         self.lines.push(line);
     }
@@ -132,7 +135,11 @@ impl<T> Memory<T> {
 #[cfg(test)]
 mod tests {
     use crate::{
-        bytecode_virtual_machine::{chunk::Chunk, instructions::Opcode, objects::Value},
+        bytecode_virtual_machine::{
+            chunk::Chunk,
+            instructions::Opcode,
+            objects::{Byte, Value},
+        },
         common::lox::utf8_to_string,
         errors::*,
     };
@@ -144,17 +151,17 @@ mod tests {
         // -((1.2 + 3.4)/5.6)
         let constant = chunk.add_constant(Value::Number(1.2));
         chunk.write_chunk(Opcode::Constant.into(), 123);
-        chunk.write_chunk(constant as u8, 123);
+        chunk.write_chunk(constant as Byte, 123);
 
         let constant = chunk.add_constant(Value::Number(3.4));
         chunk.write_chunk(Opcode::Constant.into(), 123);
-        chunk.write_chunk(constant as u8, 123);
+        chunk.write_chunk(constant as Byte, 123);
 
         chunk.write_chunk(Opcode::Add.into(), 123);
 
         let constant = chunk.add_constant(Value::Number(5.6));
         chunk.write_chunk(Opcode::Constant.into(), 123);
-        chunk.write_chunk(constant as u8, 123);
+        chunk.write_chunk(constant as Byte, 123);
 
         chunk.write_chunk(Opcode::Divide.into(), 123);
 

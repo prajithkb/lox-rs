@@ -20,7 +20,7 @@ use crate::common::scanner::Scanner;
 use crate::common::tokens::pretty_print;
 use crate::errors::*;
 
-use super::objects::{NativeFn, NativeFunction};
+use super::objects::{NativeFn, NativeFunction, Byte};
 
 const STACK_SIZE: usize = 1024;
 
@@ -188,13 +188,13 @@ impl<'a> VirtualMachine<'a> {
     }
 
     #[inline]
-    fn read_byte_at(&self, ip: usize) -> Result<u8> {
+    fn read_byte_at(&self, ip: usize) -> Result<Byte> {
         let chunk = &*self.current_chunk()?;
         Ok(*chunk.code.read_item_at(ip))
     }
 
     #[inline]
-    fn read_byte(&mut self) -> Result<u8> {
+    fn read_byte(&mut self) -> Result<Byte> {
         let ip = self.ip();
         let v = self.read_byte_at(ip)?;
         self.call_frame_mut().ip += 1;
@@ -718,7 +718,7 @@ impl<'a> VirtualMachine<'a> {
         }
     }
 
-    fn call(&mut self, arg_count: u8) -> Result<()> {
+    fn call(&mut self, arg_count: Byte) -> Result<()> {
         let arg_count = arg_count as usize;
         let value = self.peek_at(arg_count)?;
         let start_index = self.stack_top - 1 - arg_count;

@@ -4,7 +4,7 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use super::{
     chunk::Chunk,
-    objects::{Function, Object, Value},
+    objects::{Byte, Function, Object, Value},
 };
 
 #[derive(Debug, PartialEq, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
@@ -105,7 +105,7 @@ pub fn jump_instruction(
     offset + 3
 }
 
-fn as_u16(i: u8) -> u16 {
+fn as_u16(i: Byte) -> u16 {
     i as u16
 }
 
@@ -172,7 +172,7 @@ pub fn invoke_instruction(
 }
 
 pub fn disassemble_instruction(
-    byte: u8,
+    byte: Byte,
     chunk: &Chunk,
     offset: usize,
     writer: &mut dyn Write,
