@@ -171,47 +171,33 @@ impl<'a> VirtualMachine<'a> {
     }
 
     #[inline]
-    fn increment_ip_by(&mut self, offset: u16) {
-        let ip = self.ip();
-        self.set_ip(ip + offset as usize);
-    }
-
-    #[inline]
-    fn decrement_ip_by(&mut self, offset: u16) {
-        let ip = self.ip();
-        self.set_ip(ip - offset as usize);
-    }
-
-    #[inline]
     fn set_ip(&mut self, index: usize) {
         self.call_frame_mut().ip = index;
     }
 
     #[inline]
-    fn read_byte_at(&self, ip: usize) -> Result<Byte> {
-        let chunk = &*self.current_chunk()?;
+    fn read_byte_at(&self, chunk: &Chunk, ip: usize) -> Result<Byte> {
         Ok(*chunk.code.read_item_at(ip))
     }
 
     #[inline]
-    fn read_byte(&mut self) -> Result<Byte> {
-        let ip = self.ip();
-        let v = self.read_byte_at(ip)?;
-        self.call_frame_mut().ip += 1;
+    fn read_byte(&mut self, chunk: &Chunk, ip: &mut usize) -> Result<Byte> {
+        let v = self.read_byte_at(chunk, *ip)?;
+        *ip += 1;
+        self.set_ip(*ip);
         Ok(v)
     }
 
     #[inline]
-    fn read_constant(&mut self) -> Result<Value> {
-        let ip = self.ip();
-        let v = self.read_constant_at(ip)?.clone();
-        self.call_frame_mut().ip += 1;
+    fn read_constant(&mut self, chunk: &Chunk, ip: &mut usize) -> Result<Value> {
+        let v = self.read_constant_as_ref(chunk, *ip)?.clone();
+        *ip += 1;
+        self.set_ip(*ip);
         Ok(v)
     }
 
     #[inline]
-    fn read_constant_at(&self, ip: usize) -> Result<&Value> {
-        let chunk = self.current_chunk()?;
+    fn read_constant_as_ref<'b>(&self, chunk: &'b Chunk, ip: usize) -> Result<&'b Value> {
         Ok(chunk.read_constant_at(ip))
     }
 
@@ -279,49 +265,59 @@ impl<'a> VirtualMachine<'a> {
     }
 
     #[inline]
-    fn read_short(&mut self) -> Result<u16> {
-        let first = self.read_byte()? as u16;
-        let second = self.read_byte()? as u16;
+    fn read_short(&mut self, chunk: &Chunk, ip: &mut usize) -> Result<u16> {
+        let first = self.read_byte(chunk, ip)? as u16;
+        let second = self.read_byte(chunk, ip)? as u16;
         Ok(first << 8 | second)
+    }
+    #[inline]
+    fn chunk( function: &Function) -> Result<& Chunk> {
+        match function {
+            Function::UserDefined(u) => Ok(&u.chunk),
+            Function::Native(_) => todo!(),
+        }
     }
 
     fn run(&mut self) -> Result<()> {
+        let mut current_function = self.current_closure()?.function.clone();
+        let mut current_chunk  = VirtualMachine::chunk(&current_function)?;
+        let ip = &mut 0;
+        #[allow(unused_assignments)]
         loop {
             let mut buf = vec![];
             if log_enabled!(Level::Trace) {
                 trace!(
                     "IP: {} Current Stack: {:?}",
-                    self.ip(),
+                    ip,
                     self.sanitized_stack(0..self.stack_top, false)
                 );
-                let ip = self.ip();
-                self.current_chunk()?
-                    .disassemble_instruction_with_writer(ip, &mut buf);
+                current_chunk
+                    .disassemble_instruction_with_writer(*ip, &mut buf);
             }
-            let byte = self.read_byte()?;
+            let byte = self.read_byte(current_chunk, ip)?;
             let instruction: Opcode = Opcode::try_from(byte).map_err(|e| {
                 self.runtime_error(&format!(
                     "Invalid instruction (byte:{}) at {}, error: {}",
                     byte,
-                    self.ip(),
+                    ip,
                     e
                 ))
             })?;
             if log_enabled!(Level::Trace) {
-                let fun_name = (*self.current_function()?).to_string();
+                let fun_name = current_function.to_string();
                 trace!(
-                    "In function {} Next Instruction: [{}]",
+                    "IP: {}, In function {} Next Instruction: [{}]",
+                    ip,
                     fun_name,
                     utf8_to_string(&buf).trim()
                 );
             }
             match instruction {
                 Opcode::Constant => {
-                    let constant = self.read_constant()?;
+                    let constant = self.read_constant(current_chunk,ip)?;
                     self.push(constant)?;
                 }
                 Opcode::Return => {
-                    trace!("Call frame count: {}", self.call_frames.len());
                     let fn_starting_pointer = self.call_frame().fn_start_stack_index;
                     let result = self.pop();
                     self.close_upvalues(fn_starting_pointer)?;
@@ -329,6 +325,9 @@ impl<'a> VirtualMachine<'a> {
                         return Ok(());
                     }
                     let _frame = self.call_frames.pop().expect("expect frame");
+                    current_function = self.current_closure()?.function.clone();
+                    current_chunk = VirtualMachine::chunk(&current_function)?;
+                    *ip = self.ip();
                     // drop all the local values for the last function
                     self.stack_top = fn_starting_pointer;
                     // push the return result
@@ -376,11 +375,11 @@ impl<'a> VirtualMachine<'a> {
                 }
                 Opcode::DefineGlobal => {
                     let value = self.pop();
-                    let name = self.read_string()?;
+                    let name = self.read_string(current_chunk, ip)?;
                     self.runtime_values.insert(name, value);
                 }
                 Opcode::GetGlobal => {
-                    let name = self.read_str_without_increment()?;
+                    let name = self.read_str(current_chunk, ip)?;
                     let value = self.runtime_values.get(name);
                     if let Some(v) = value {
                         let v = v.clone();
@@ -388,10 +387,9 @@ impl<'a> VirtualMachine<'a> {
                     } else {
                         bail!(self.runtime_error(&format!("Undefined variable '{}'", &name)))
                     }
-                    self.increment_ip_by(1);
                 }
                 Opcode::SetGlobal => {
-                    let name = self.read_string()?;
+                    let name = self.read_string(current_chunk, ip)?;
                     let value = self.peek_at(0)?.clone();
                     let v = self.runtime_values.get_mut(&name);
                     match v {
@@ -405,49 +403,57 @@ impl<'a> VirtualMachine<'a> {
                     }
                 }
                 Opcode::GetLocal => {
-                    let index = self.read_byte()? as usize;
+                    let index = self.read_byte(current_chunk, ip)? as usize;
                     let fn_start_pointer = self.call_frame().fn_start_stack_index;
                     let v = self.get_stack(fn_start_pointer + index)?.clone();
                     self.push(v)?;
                 }
                 Opcode::SetLocal => {
-                    let index = self.read_byte()?;
+                    let index = self.read_byte(current_chunk, ip)?;
                     let fn_start_pointer = self.call_frame().fn_start_stack_index;
                     self.stack[fn_start_pointer + index as usize] = self.peek_at(0)?.clone();
                 }
                 Opcode::JumpIfFalse => {
-                    let offset = self.read_short()?;
+                    let offset = self.read_short(current_chunk, ip)?;
                     if is_falsey(self.peek_at(0)?) {
-                        self.increment_ip_by(offset);
+                        *ip += offset as usize;
+                        self.set_ip(*ip);
                     }
                 }
                 Opcode::Jump => {
-                    let offset = self.read_short()?;
-                    self.increment_ip_by(offset);
+                    let offset = self.read_short(current_chunk, ip)?;
+                    *ip += offset as usize;
+                    self.set_ip(*ip);
                 }
                 Opcode::JumpIfTrue => {
-                    let offset = self.read_short()?;
+                    let offset = self.read_short(current_chunk, ip)?;
                     if !is_falsey(self.peek_at(0)?) {
-                        self.increment_ip_by(offset);
+                        *ip +=  offset as usize;
+                        self.set_ip(*ip);
                     }
                 }
                 Opcode::Loop => {
-                    let offset = self.read_short()?;
-                    self.decrement_ip_by(offset);
+                    let offset = self.read_short(current_chunk, ip)?;
+                    // self.decrement_ip_by(offset);
+                    *ip -= offset as usize;
+                    self.set_ip(*ip);
                 }
                 Opcode::Call => {
-                    let arg_count = self.read_byte()?;
+                    let arg_count = self.read_byte(current_chunk,ip)?;
                     self.call(arg_count)?;
+                    current_function = self.current_closure()?.function.clone();
+                    current_chunk = VirtualMachine::chunk(&current_function)?;
+                    *ip = self.ip();
                 }
                 Opcode::Closure => {
-                    let function = self.read_function()?;
+                    let function = self.read_function(current_chunk, ip)?;
                     let current_fn_stack_ptr = self.call_frame().fn_start_stack_index;
                     let mut closure = Closure::new(function.clone());
                     match &*function {
                         Function::UserDefined(u) => {
                             for _ in 0..u.upvalue_count {
-                                let is_local = self.read_byte()?;
-                                let index = self.read_byte()?;
+                                let is_local = self.read_byte(current_chunk, ip)?;
+                                let index = self.read_byte(current_chunk, ip)?;
                                 if is_local > 0 {
                                     let upvalue_index_on_stack =
                                         current_fn_stack_ptr + index as usize;
@@ -466,7 +472,7 @@ impl<'a> VirtualMachine<'a> {
                     self.push(Value::Object(Object::Closure(closure)))?;
                 }
                 Opcode::GetUpvalue => {
-                    let slot = self.read_byte()?;
+                    let slot = self.read_byte(current_chunk, ip)?;
                     let closure = self.current_closure()?;
                     let value = {
                         let upvalue = (&*closure.upvalues[slot as usize]).borrow();
@@ -478,7 +484,7 @@ impl<'a> VirtualMachine<'a> {
                     self.push(value)?;
                 }
                 Opcode::SetUpvalue => {
-                    let slot = self.read_byte()?;
+                    let slot = self.read_byte(current_chunk, ip)?;
                     let value = self.peek_at(slot as usize)?.clone();
                     let closure = self.current_closure()?;
                     let upvalue = &closure.upvalues[slot as usize];
@@ -501,11 +507,11 @@ impl<'a> VirtualMachine<'a> {
                     self.pop();
                 }
                 Opcode::Class => {
-                    let class = self.read_string()?;
+                    let class = self.read_string(current_chunk, ip)?;
                     self.push(Value::Object(Object::Class(Rc::new(Class::new(class)))))?
                 }
                 Opcode::SetProperty => {
-                    let property = self.read_string()?;
+                    let property = self.read_string(current_chunk, ip)?;
                     let value = self.peek_at(0)?.clone();
                     let instance = self.peek_at(1)?;
                     self.set_property(instance, property, value)?;
@@ -514,8 +520,8 @@ impl<'a> VirtualMachine<'a> {
                     self.push(value)?;
                 }
                 Opcode::GetProperty => {
+                    let property = self.read_str(current_chunk, ip)?;
                     let instance = self.peek_at(0)?;
-                    let property = self.read_str_without_increment()?;
                     let (value, method) = self.get_property(instance, property)?;
                     if let Some(method) = method {
                         self.bind_method(value, method)?;
@@ -523,15 +529,14 @@ impl<'a> VirtualMachine<'a> {
                         self.pop(); // instance
                         self.push(value)?;
                     }
-                    self.increment_ip_by(1);
                 }
                 Opcode::Method => {
-                    let method_name = self.read_string()?;
+                    let method_name = self.read_string(current_chunk, ip)?;
                     self.define_method(method_name)?;
                 }
                 Opcode::Invoke => {
-                    let method = self.read_string()?;
-                    let arg_count = self.read_byte()? as usize;
+                    let method = self.read_string(current_chunk, ip)?;
+                    let arg_count = self.read_byte(current_chunk, ip)? as usize;
                     let receiver = self.peek_at(arg_count)?;
                     let fn_start_stack_index = self.stack_top - arg_count - 1;
                     match receiver {
@@ -561,6 +566,9 @@ impl<'a> VirtualMachine<'a> {
                         }
                         _ => bail!(self.runtime_error("Only instance can have methods")),
                     };
+                    current_function = self.current_closure()?.function.clone();
+                    current_chunk = VirtualMachine::chunk(&current_function)?;
+                    *ip = self.ip();
                 }
             };
         }
@@ -826,24 +834,26 @@ impl<'a> VirtualMachine<'a> {
     }
 
     #[inline]
-    fn read_str_without_increment(&self) -> Result<&str> {
-        let constant = self.read_constant_at(self.ip())?;
-        match constant {
+    fn read_str<'b>(&mut self, chunk:  &'b Chunk, ip: &mut usize) -> Result<&'b str> {
+        let constant = self.read_constant_as_ref(chunk, *ip)?;
+        let r: Result<&'b str> = match constant {
             Value::Object(Object::String(s)) => Ok(s),
             _ => Err(self.runtime_error("message").into()),
-        }
+        };
+        *ip += 1;
+        self.set_ip(*ip);
+        r
     }
 
     #[inline]
-    fn read_string(&mut self) -> Result<String> {
-        let result = self.read_str_without_increment()?.to_string();
-        self.increment_ip_by(1);
+    fn read_string(&mut self, chunk:  &Chunk, ip: &mut usize) -> Result<String> {
+        let result = self.read_str(chunk, ip)?.to_string();
         Ok(result)
     }
 
     #[inline]
-    fn read_function(&mut self) -> Result<Rc<Function>> {
-        let constant = self.read_constant()?;
+    fn read_function(&mut self, chunk:  &Chunk, ip: &mut usize) -> Result<Rc<Function>> {
+        let constant = self.read_constant(chunk, ip)?;
         match constant {
             Value::Object(Object::Function(s)) => Ok(s),
             _ => bail!(self.runtime_error("Not a function")),
