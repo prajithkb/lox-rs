@@ -24,10 +24,10 @@ fn perf_timings() -> Result<()> {
         a.file_name().cmp(&b.file_name())
     });
     let mut table = vec![];
-    let allow_listed_entries = entries.into_iter().filter(|e| {
-        [OsStr::new("string_equality.lox").to_os_string()]
-            .contains(&e.as_ref().unwrap().file_name())
-    });
+    let allow_listed_entries = entries;
+    // let allow_listed_entries = entries.into_iter().filter(|e| {
+    //     [OsStr::new("zoo_batch.lox").to_os_string()].contains(&e.as_ref().unwrap().file_name())
+    // });
     for entry in allow_listed_entries {
         let e = entry?;
         if e.file_type()?.is_file() {
