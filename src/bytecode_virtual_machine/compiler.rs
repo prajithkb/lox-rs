@@ -1,5 +1,5 @@
 use std::{
-    collections::{linked_list::IterMut, LinkedList},
+    collections::{linked_list::IterMut, HashMap, LinkedList},
     io::stdout,
     iter::Rev,
     rc::Rc,
@@ -17,7 +17,7 @@ use crate::{
 use super::{
     chunk::Chunk,
     instructions::Opcode,
-    objects::{Byte, Function, Object, UserDefinedFunction, Value},
+    objects::{Byte, Function, Object, SharedString, UserDefinedFunction, Value},
 };
 
 fn parse_error(token: &Token, message: &str) -> ErrorKind {
@@ -173,6 +173,7 @@ pub struct Compiler<'a> {
     custom_writer: Writer<'a>,
     current_class: Option<ClassCompiler>,
     class_compilers: LinkedList<ClassCompiler>,
+    strings: HashMap<String, SharedString>,
 }
 #[allow(dead_code)]
 impl<'a> Compiler<'a> {
@@ -194,7 +195,11 @@ impl<'a> Compiler<'a> {
             token_index: 0,
             parse_rules: Vec::new(),
             state: State::new(
-                Function::UserDefined(UserDefinedFunction::new(0, Chunk::new(), "".to_string())),
+                Function::UserDefined(UserDefinedFunction::new(
+                    0,
+                    Chunk::new(),
+                    SharedString::from_str(""),
+                )),
                 Scope::new(),
                 function_type,
             ),
@@ -202,6 +207,7 @@ impl<'a> Compiler<'a> {
             custom_writer,
             current_class: None,
             class_compilers: LinkedList::new(),
+            strings: HashMap::new(),
         };
         c.current_scope_mut().locals.push(Local::new("", Some(0)));
         c.init_parse_rules();
@@ -362,6 +368,7 @@ impl<'a> Compiler<'a> {
             self.declaration()?;
         }
         self.emit_return_and_log();
+        self.strings.clear();
         Ok(self.state.function)
     }
 
@@ -419,6 +426,7 @@ impl<'a> Compiler<'a> {
 
     fn start_new_function(&mut self, function_type: FunctionType) -> Result<()> {
         let new_function_name = self.function_name(function_type)?;
+        let new_function_name = self.new_shared_string(&new_function_name);
         let new_function =
             Function::UserDefined(UserDefinedFunction::new(0, Chunk::new(), new_function_name));
         let mut new_scope = Scope::new();
@@ -796,7 +804,7 @@ impl<'a> Compiler<'a> {
 
     fn string(&mut self, _can_assign: bool) -> Result<()> {
         if let Some(Literal::String(s)) = &self.previous().literal {
-            let value = Value::Object(Object::String(s.to_string()));
+            let value = Value::Object(Object::SharedString(self.new_shared_string(s)));
             self.emit_constant(value);
             Ok(())
         } else {
@@ -915,6 +923,17 @@ impl<'a> Compiler<'a> {
     }
 
     #[inline]
+    fn new_shared_string(&mut self, name: &str) -> SharedString {
+        if let Some(s) = self.strings.get(name) {
+            s.clone()
+        } else {
+            let new_string = SharedString::from_str(name);
+            self.strings.insert(name.to_string(), new_string.clone());
+            new_string
+        }
+    }
+
+    #[inline]
     fn get_rule(&mut self, token_type: TokenType) -> &ParseRule<'a> {
         let index: usize = token_type.into();
         &self.parse_rules[index]
@@ -1030,7 +1049,7 @@ impl<'a> Compiler<'a> {
     fn identifier_constant(&mut self, mut token: Token) -> Result<Byte> {
         let literal = token.literal.take();
         if let Literal::Identifier(s) = literal.expect("Expect string") {
-            let name = Value::Object(Object::String(s));
+            let name = Value::Object(Object::SharedString(self.new_shared_string(&s)));
             Ok(self.add_constant(name))
         } else {
             bail!(parse_error(&token, "Expect identifier"))
@@ -1154,8 +1173,11 @@ fn as_two_bytes(jump: usize) -> (Byte, Byte) {
 
 #[cfg(test)]
 mod tests {
+    use std::rc::Rc;
+
     use crate::bytecode_virtual_machine::compiler::FunctionType;
     use crate::bytecode_virtual_machine::objects::Function::{Native, UserDefined};
+    use crate::bytecode_virtual_machine::objects::{Object, Value};
     use crate::{common::lox::utf8_to_string, common::scanner::Scanner, errors::*};
 
     use super::Compiler;
@@ -1318,6 +1340,26 @@ mod tests {
 "#,
             utf8_to_string(&buf)
         );
+        //  String optimization
+        let source = r#" "Hello" + "Hello"; "#;
+        let mut scanner = Scanner::new(source.to_string());
+        let tokens = scanner.scan_tokens()?;
+        let compiler = Compiler::new(tokens);
+        let function = compiler.compile()?;
+        match &function {
+            UserDefined(u) => {
+                let (a, b) = match (u.chunk.read_constant_at(0), u.chunk.read_constant_at(3)) {
+                    (
+                        Value::Object(Object::SharedString(l)),
+                        Value::Object(Object::SharedString(r)),
+                    ) => (l, r),
+                    _ => panic!("failed"),
+                };
+                assert_eq!(a, b);
+                assert!(std::ptr::eq(Rc::as_ptr(&a.0), Rc::as_ptr(&b.0)))
+            }
+            Native(_) => panic!("This should not happen"),
+        }
         Ok(())
     }
 

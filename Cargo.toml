@@ -14,6 +14,6 @@ num_enum = "0.5.4"
 
 [dev-dependencies]
 cli-table = "0.4.6"
-
+ctor = "0.1.21"
 [profile.release]
 debug = true

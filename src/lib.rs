@@ -34,3 +34,11 @@ pub use errors::*;
 pub mod bytecode_virtual_machine;
 pub mod common;
 pub mod tree_walk_interpreter;
+
+// Initialize logger for tests
+// Pass RUST_LOG=trace for getting trace logs
+#[cfg(test)]
+#[ctor::ctor]
+fn init() {
+    env_logger::init();
+}

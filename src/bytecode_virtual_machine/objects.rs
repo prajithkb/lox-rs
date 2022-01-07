@@ -32,10 +32,41 @@ impl Default for Value {
         Value::Unitialized
     }
 }
+#[derive(Debug, Clone, Eq)]
+pub struct SharedString(pub Rc<String>);
+
+impl SharedString {
+    pub fn from_str(s: &str) -> Self {
+        SharedString::from_string(s.into())
+    }
+
+    pub fn from_string(s: String) -> Self {
+        SharedString(Rc::new(s))
+    }
+}
+
+impl PartialEq for SharedString {
+    fn eq(&self, other: &Self) -> bool {
+        std::ptr::eq(Rc::as_ptr(&self.0), Rc::as_ptr(&other.0)) || self.0 == other.0
+    }
+}
+
+impl std::hash::Hash for SharedString {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // std::ptr::hash(Rc::as_ptr(&self.0), state);
+        self.0.hash(state)
+    }
+}
+impl Display for SharedString {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
 
 #[derive(Debug, Clone)]
 pub enum Object {
     String(String),
+    SharedString(SharedString),
     Function(Rc<Function>),
     Class(Rc<Class>),
     Instance(Instance),
@@ -45,12 +76,12 @@ pub enum Object {
 
 #[derive(Debug, Clone)]
 pub struct Class {
-    pub name: String,
-    pub methods: Shared<HashMap<String, Rc<Closure>>>,
+    pub name: SharedString,
+    pub methods: Shared<HashMap<SharedString, Rc<Closure>>>,
 }
 
 impl Class {
-    pub fn new(name: String) -> Self {
+    pub fn new(name: SharedString) -> Self {
         Class {
             name,
             methods: shared(HashMap::new()),
@@ -67,7 +98,7 @@ impl Display for Class {
 #[derive(Debug, Clone)]
 pub struct Instance {
     pub class: Rc<Class>,
-    pub fields: Shared<HashMap<String, Value>>,
+    pub fields: Shared<HashMap<SharedString, Value>>,
 }
 
 impl Instance {
@@ -135,6 +166,7 @@ impl Display for Object {
             Object::Receiver(value, method) => {
                 f.write_str(&format!("{} as receiver for {}", value, method))
             }
+            Object::SharedString(s) => f.write_str(&s.to_string()),
         }
     }
 }
@@ -162,7 +194,7 @@ impl Display for Function {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self {
             Function::UserDefined(u) => {
-                let mut name = &*u.name;
+                let mut name = &**u.name.0;
                 if name.is_empty() {
                     name = "script";
                 }
@@ -177,7 +209,7 @@ pub type NativeFn = Rc<dyn Fn(Vec<Value>) -> Value>;
 
 #[derive(Clone)]
 pub struct NativeFunction {
-    pub name: String,
+    pub name: SharedString,
     pub arity: usize,
     pub function: NativeFn,
 }
@@ -191,7 +223,7 @@ impl std::fmt::Debug for NativeFunction {
 }
 
 impl NativeFunction {
-    pub fn new(name: String, arity: usize, function: NativeFn) -> Self {
+    pub fn new(name: SharedString, arity: usize, function: NativeFn) -> Self {
         NativeFunction {
             name,
             arity,
@@ -209,12 +241,12 @@ impl NativeFunction {
 pub struct UserDefinedFunction {
     pub arity: usize,
     pub chunk: Chunk,
-    pub name: String,
+    pub name: SharedString,
     pub upvalue_count: usize,
 }
 
 impl UserDefinedFunction {
-    pub fn new(arity: usize, chunk: Chunk, name: String) -> Self {
+    pub fn new(arity: usize, chunk: Chunk, name: SharedString) -> Self {
         UserDefinedFunction {
             arity,
             chunk,
@@ -223,33 +255,41 @@ impl UserDefinedFunction {
         }
     }
 }
+
+// pub type Strings = Objects<String, SharedString>;
+
+pub type Values = Objects<SharedString, Value>;
+
 #[allow(dead_code)]
 #[derive(Debug)]
-pub struct Values {
-    objects: HashMap<String, Value>,
+pub struct Objects<K, V>
+where
+    K: std::hash::Hash + std::cmp::Eq,
+{
+    objects: HashMap<K, V>,
 }
 
 #[allow(dead_code)]
-impl Values {
+impl<K: std::hash::Hash + std::cmp::Eq, V> Objects<K, V> {
     pub fn new() -> Self {
-        Values {
+        Objects {
             objects: HashMap::new(),
         }
     }
 
-    pub fn insert(&mut self, key: String, value: Value) {
+    pub fn insert(&mut self, key: K, value: V) {
         self.objects.insert(key, value);
     }
 
-    pub fn get(&self, key: &str) -> Option<&Value> {
+    pub fn get(&self, key: &K) -> Option<&V> {
         self.objects.get(key)
     }
 
-    pub fn get_mut(&mut self, key: &str) -> Option<&mut Value> {
+    pub fn get_mut(&mut self, key: &K) -> Option<&mut V> {
         self.objects.get_mut(key)
     }
 
-    pub fn remove(&mut self, key: &str) {
+    pub fn remove(&mut self, key: &K) {
         self.objects.remove(key);
     }
 }

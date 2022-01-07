@@ -20,7 +20,7 @@ use crate::common::scanner::Scanner;
 use crate::common::tokens::pretty_print;
 use crate::errors::*;
 
-use super::objects::{NativeFn, NativeFunction, Byte};
+use super::objects::{NativeFn, NativeFunction, Byte, SharedString};
 
 const STACK_SIZE: usize = 1024;
 
@@ -40,12 +40,11 @@ impl CallFrame {
 }
 
 pub fn define_native_fn(name: String, arity: usize, vm: &mut VirtualMachine, native_fn: NativeFn) {
-    vm.runtime_values.insert(
-        name.clone(),
-        Value::Object(Object::Function(Rc::new(Function::Native(
-            NativeFunction::new(name, arity, native_fn),
-        )))),
-    );
+    let key = SharedString::from_str(&name);
+    vm.runtime_values.insert(key.clone(), Value::Object(Object::Function(Rc::new(Function::Native(
+        NativeFunction::new(key, arity, native_fn),
+    )))));
+    
 }
 
 pub struct VirtualMachine<'a> {
@@ -53,6 +52,7 @@ pub struct VirtualMachine<'a> {
     stack_top: usize,
     call_frames: Vec<CallFrame>,
     runtime_values: Values,
+    // runtime_strings: Strings,
     up_values: LinkedList<Shared<Upvalue>>,
     custom_writer: Writer<'a>,
 }
@@ -102,6 +102,7 @@ impl<'a> VirtualMachine<'a> {
             stack_top: 0,
             call_frames: Vec::new(),
             runtime_values: Values::new(),
+            // runtime_strings: Strings::new(),
             up_values: LinkedList::new(),
             // up_values_in_stack: LinkedList::new(),
             custom_writer,
@@ -190,15 +191,16 @@ impl<'a> VirtualMachine<'a> {
 
     #[inline]
     fn read_constant(&mut self, chunk: &Chunk, ip: &mut usize) -> Result<Value> {
-        let v = self.read_constant_as_ref(chunk, *ip)?.clone();
-        *ip += 1;
-        self.set_ip(*ip);
+        let v = self.read_constant_as_ref(chunk, ip)?.clone();
         Ok(v)
     }
 
     #[inline]
-    fn read_constant_as_ref<'b>(&self, chunk: &'b Chunk, ip: usize) -> Result<&'b Value> {
-        Ok(chunk.read_constant_at(ip))
+    fn read_constant_as_ref<'b>(&mut self, chunk: &'b Chunk, ip: &mut usize) -> Result<&'b Value> {
+        let v = chunk.read_constant_at(*ip);
+        *ip += 1;
+        self.set_ip(*ip);
+        Ok(v)
     }
 
     #[inline]
@@ -206,7 +208,7 @@ impl<'a> VirtualMachine<'a> {
         let function = self.current_function()?;
         match function {
             Function::UserDefined(u) => Ok(&u.chunk),
-            Function::Native(_) => todo!(),
+            Function::Native(_) => bail!(self.runtime_error("VM BUG: Native function cannot have a chunk")),
         }
     }
 
@@ -389,9 +391,9 @@ impl<'a> VirtualMachine<'a> {
                     }
                 }
                 Opcode::SetGlobal => {
-                    let name = self.read_string(current_chunk, ip)?;
+                    let name = self.read_str(current_chunk, ip)?;
                     let value = self.peek_at(0)?.clone();
-                    let v = self.runtime_values.get_mut(&name);
+                    let v = self.runtime_values.get_mut(name);
                     match v {
                         Some(e) => {
                             *e = value;
@@ -535,7 +537,7 @@ impl<'a> VirtualMachine<'a> {
                     self.define_method(method_name)?;
                 }
                 Opcode::Invoke => {
-                    let method = self.read_string(current_chunk, ip)?;
+                    let method = self.read_str(current_chunk, ip)?;
                     let arg_count = self.read_byte(current_chunk, ip)? as usize;
                     let receiver = self.peek_at(arg_count)?;
                     let fn_start_stack_index = self.stack_top - arg_count - 1;
@@ -546,7 +548,7 @@ impl<'a> VirtualMachine<'a> {
                                 Value::Object(Object::Instance(instance)) => {
                                     let class = instance.class.clone();
                                     let (method, receiver) =
-                                        self.get_method_and_receiver(class, receiver, &method)?;
+                                        self.get_method_and_receiver(class, receiver, method)?;
                                     self.set_stack_mut(fn_start_stack_index, receiver)?;
                                     self.call_function(
                                         &method.function,
@@ -560,7 +562,7 @@ impl<'a> VirtualMachine<'a> {
                         Value::Object(Object::Instance(instance)) => {
                             let class = instance.class.clone();
                             let (method, receiver) =
-                                self.get_method_and_receiver(class, receiver, &method)?;
+                                self.get_method_and_receiver(class, receiver, method)?;
                             self.set_stack_mut(fn_start_stack_index, receiver)?;
                             self.call_function(&method.function, arg_count, fn_start_stack_index)?;
                         }
@@ -577,7 +579,7 @@ impl<'a> VirtualMachine<'a> {
         &self,
         class: Rc<Class>,
         receiver: &Value,
-        method: &str,
+        method: &SharedString,
     ) -> Result<(Rc<Closure>, Value)> {
         let method = self.get_method(class, method)?;
         let receiver = match receiver {
@@ -589,7 +591,7 @@ impl<'a> VirtualMachine<'a> {
         Ok((method, receiver))
     }
 
-    fn set_property(&self, instance: &Value, property: String, value: Value) -> Result<()> {
+    fn set_property(&self, instance: &Value, property: SharedString, value: Value) -> Result<()> {
         match instance {
             Value::Object(Object::Instance(instance)) => {
                 let mut fields_mut = (*instance.fields).borrow_mut();
@@ -607,7 +609,7 @@ impl<'a> VirtualMachine<'a> {
     fn get_property(
         &self,
         instance: &Value,
-        property: &str,
+        property: &SharedString,
     ) -> Result<(Value, Option<Rc<Closure>>)> {
         match instance {
             Value::Object(Object::Instance(instance)) => {
@@ -629,7 +631,7 @@ impl<'a> VirtualMachine<'a> {
         }
     }
 
-    fn get_method(&self, class: Rc<Class>, name: &str) -> Result<Rc<Closure>> {
+    fn get_method(&self, class: Rc<Class>, name: &SharedString) -> Result<Rc<Closure>> {
         let method = (*class.methods).borrow();
         if let Some(c) = method.get(name) {
             Ok(c.clone())
@@ -648,7 +650,7 @@ impl<'a> VirtualMachine<'a> {
         Ok(())
     }
 
-    fn define_method(&mut self, method_name: String) -> Result<()> {
+    fn define_method(&mut self, method_name: SharedString) -> Result<()> {
         let method = self.peek_at(0)?.clone();
         match method {
             Value::Object(Object::Closure(closure)) => match self.peek_at(1)? {
@@ -739,7 +741,8 @@ impl<'a> VirtualMachine<'a> {
                 let class = c.clone();
                 let methods = c.methods.clone();
                 let receiver = Value::Object(Object::Instance(Instance::new(class)));
-                if let Some(initializer) = (*methods).borrow().get("init") {
+                let init = SharedString(Rc::new("init".to_string()));
+                if let Some(initializer) = (*methods).borrow().get(&init) {
                     // set the receiver at start index for the constructor;
                     self.set_stack_mut(
                         start_index,
@@ -834,28 +837,29 @@ impl<'a> VirtualMachine<'a> {
     }
 
     #[inline]
-    fn read_str<'b>(&mut self, chunk:  &'b Chunk, ip: &mut usize) -> Result<&'b str> {
-        let constant = self.read_constant_as_ref(chunk, *ip)?;
-        let r: Result<&'b str> = match constant {
-            Value::Object(Object::String(s)) => Ok(s),
+    fn read_str<'b>(&mut self, chunk:  &'b Chunk, ip: &mut usize) -> Result<&'b SharedString> {
+        let constant = self.read_constant_as_ref(chunk, ip)?;
+        let r: Result<&'b SharedString> = match constant {
+            Value::Object(Object::SharedString(s)) => Ok(s),
             _ => Err(self.runtime_error("message").into()),
         };
-        *ip += 1;
-        self.set_ip(*ip);
         r
     }
 
     #[inline]
-    fn read_string(&mut self, chunk:  &Chunk, ip: &mut usize) -> Result<String> {
-        let result = self.read_str(chunk, ip)?.to_string();
-        Ok(result)
+    fn read_string(&mut self, chunk:  &Chunk, ip: &mut usize) -> Result<SharedString> {
+        let constant = self.read_constant_as_ref(chunk, ip)?;
+        match constant {
+            Value::Object(Object::SharedString(s)) => Ok(s.clone()),
+            _ => Err(self.runtime_error("message").into()),
+        }
     }
 
     #[inline]
     fn read_function(&mut self, chunk:  &Chunk, ip: &mut usize) -> Result<Rc<Function>> {
-        let constant = self.read_constant(chunk, ip)?;
+        let constant = self.read_constant_as_ref(chunk, ip)?;
         match constant {
-            Value::Object(Object::Function(s)) => Ok(s),
+            Value::Object(Object::Function(s)) => Ok(s.clone()),
             _ => bail!(self.runtime_error("Not a function")),
         }
     }
@@ -936,7 +940,16 @@ impl<'a> VirtualMachine<'a> {
                 self.pop();
                 self.push(Value::Object(Object::String(concatenated_string)))?;
                 Ok(())
-            }
+            },
+            (Value::Object(Object::SharedString(left)), Value::Object(Object::SharedString(right))) => {
+                let mut concatenated_string = String::new();
+                concatenated_string.push_str(&left.0);
+                concatenated_string.push_str(&right.0);
+                self.pop();
+                self.pop();
+                self.push(Value::Object(Object::SharedString(SharedString(Rc::new(concatenated_string)))))?;
+                Ok(())
+            },
             (Value::Number(_), Value::Number(_)) => self.binary_op(|a, b| Value::Number(a + b)),
             _ => bail!(self.runtime_error(&format!(
                 "Add can be perfomed only on numbers or strings, got {} and {}",
@@ -1010,6 +1023,7 @@ fn value_equals(l: Value, r: Value) -> Result<bool> {
         (Value::Number(l), Value::Number(r)) => Ok(num_equals(l, r)),
         (Value::Object(l), Value::Object(r)) => match (l, r) {
             (Object::String(l), Object::String(r)) => Ok(l == r),
+            (Object::SharedString(l), Object::SharedString(r)) => Ok(l==r),
             _ => Ok(false),
         },
         _ => Ok(false),
