@@ -9,6 +9,8 @@ The complete Lox grammer is available [here](https://craftinginterpreters.com/ap
 
 * Garbage collection. Currently the Clox implementation does not have garbage collection.
 
+* Debugger
+
 * Performance optimization. Need to profile and tweak it.
 
 

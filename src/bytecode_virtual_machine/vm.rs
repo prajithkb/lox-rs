@@ -1,5 +1,5 @@
 use std::collections::LinkedList;
-use std::convert::TryFrom;
+use std::convert::{TryFrom};
 use std::f64::EPSILON;
 use std::io::{stdout, Write};
 use std::mem::{self, MaybeUninit};
@@ -286,15 +286,16 @@ impl<'a> VirtualMachine<'a> {
         let ip = &mut 0;
         #[allow(unused_assignments)]
         loop {
-            let mut buf = vec![];
+            let mut buf = None;
             if log_enabled!(Level::Trace) {
+                buf = Some(vec![]);
                 trace!(
                     "IP: {} Current Stack: {:?}",
                     ip,
                     self.sanitized_stack(0..self.stack_top, false)
                 );
                 current_chunk
-                    .disassemble_instruction_with_writer(*ip, &mut buf);
+                    .disassemble_instruction_with_writer(*ip, buf.as_mut().unwrap());
             }
             let byte = self.read_byte(current_chunk, ip)?;
             let instruction: Opcode = Opcode::try_from(byte).map_err(|e| {
@@ -311,7 +312,7 @@ impl<'a> VirtualMachine<'a> {
                     "IP: {}, In function {} Next Instruction: [{}]",
                     ip,
                     fun_name,
-                    utf8_to_string(&buf).trim()
+                    utf8_to_string(buf.as_ref().unwrap()).trim()
                 );
             }
             match instruction {

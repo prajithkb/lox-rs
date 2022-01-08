@@ -92,7 +92,7 @@ impl Chunk {
 
 #[derive(Debug, PartialEq, Clone)]
 pub struct Memory<T> {
-    inner: Vec<T>,
+    pub inner: Vec<T>,
     pub count: usize,
     pub read_index: usize,
 }
