@@ -43,6 +43,7 @@ impl Display for StackValue {
 }
 
 impl From<&Value> for StackValue {
+    #[inline(always)]
     fn from(v: &Value) -> Self {
         match v {
             Value::Unitialized => StackValue::Unitialized,

@@ -4,6 +4,7 @@ use std::f64::EPSILON;
 use std::io::{stdout, Write};
 use std::mem::{self, MaybeUninit};
 use std::ops::Range;
+use std::ptr::NonNull;
 use std::rc::Rc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -57,6 +58,7 @@ pub struct VirtualMachine<'a> {
     // runtime_strings: Strings,
     up_values: LinkedList<Shared<Upvalue>>,
     custom_writer: Writer<'a>,
+    ip: NonNull<usize>
 }
 
 impl<'a> std::fmt::Debug for VirtualMachine<'a> {
@@ -108,6 +110,7 @@ impl<'a> VirtualMachine<'a> {
             up_values: LinkedList::new(),
             allocated_objects: Vec::with_capacity(STACK_SIZE),
             custom_writer,
+            ip: NonNull::new(&mut 0usize).expect("Null pointer")
         }
     }
 
@@ -177,12 +180,18 @@ impl<'a> VirtualMachine<'a> {
 
     #[inline]
     fn ip(&self) -> usize {
-        self.call_frame().ip
+        // self.call_frame().ip
+        unsafe { *self.ip.as_ref() }
     }
 
     #[inline]
     fn set_ip(&mut self, index: usize) {
-        self.call_frame_mut().ip = index;
+        // self.call_frame_mut().ip = index;
+        unsafe {*self.ip.as_mut() = index}
+    }
+
+    fn set_ip_ptr(&mut self, ptr: *mut  usize) {
+        self.ip = NonNull::new(ptr).expect("null pointer");
     }
 
     #[inline]
@@ -357,6 +366,8 @@ impl<'a> VirtualMachine<'a> {
                     let _frame = self.call_frames.pop().expect("expect frame");
                     current_function = self.current_closure()?.function.clone();
                     current_chunk = VirtualMachine::chunk(&current_function)?;
+                    let ip_ptr = &mut self.call_frame_mut().ip as *mut usize;
+                    self.set_ip_ptr(ip_ptr);
                     *ip = self.ip();
                     // drop all the local values for the last function
                     self.stack_top = fn_starting_pointer;
@@ -473,6 +484,8 @@ impl<'a> VirtualMachine<'a> {
                     self.call(arg_count)?;
                     current_function = self.current_closure()?.function.clone();
                     current_chunk = VirtualMachine::chunk(&current_function)?;
+                    let ip_ptr = &mut self.call_frame_mut().ip as *mut usize;
+                    self.set_ip_ptr(ip_ptr);
                     *ip = self.ip();
                 }
                 Opcode::Closure => {
@@ -608,6 +621,8 @@ impl<'a> VirtualMachine<'a> {
                     };
                     current_function = self.current_closure()?.function.clone();
                     current_chunk = VirtualMachine::chunk(&current_function)?;
+                    let ip_ptr = &mut self.call_frame_mut().ip as *mut usize;
+                    self.set_ip_ptr(ip_ptr);
                     *ip = self.ip();
                 }
             };
