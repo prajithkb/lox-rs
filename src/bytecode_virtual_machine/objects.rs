@@ -15,6 +15,45 @@ pub enum Value {
     Object(Object),
 }
 
+#[derive(Debug, Clone, Copy)]
+pub enum StackValue {
+    Unitialized,
+    Bool(bool),
+    Nil,
+    Number(f64),
+    Object(ObjectPtr),
+}
+
+impl Default for StackValue {
+    fn default() -> Self {
+        StackValue::Unitialized
+    }
+}
+
+impl Display for StackValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StackValue::Bool(b) => f.write_str(&b.to_string()),
+            StackValue::Nil => f.write_str("nil"),
+            StackValue::Number(n) => f.write_str(&n.to_string()),
+            StackValue::Object(o) => f.write_str(&o.to_string()),
+            StackValue::Unitialized => f.write_str("Uninitialized"),
+        }
+    }
+}
+
+impl From<&Value> for StackValue {
+    fn from(v: &Value) -> Self {
+        match v {
+            Value::Unitialized => StackValue::Unitialized,
+            Value::Bool(b) => StackValue::Bool(*b),
+            Value::Nil => StackValue::Nil,
+            Value::Number(n) => StackValue::Number(*n),
+            Value::Object(o) => StackValue::Object(ObjectPtr::new(o)),
+        }
+    }
+}
+
 impl Display for Value {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -32,10 +71,34 @@ impl Default for Value {
         Value::Unitialized
     }
 }
+
+#[derive(Debug, Clone, Copy)]
+pub struct ObjectPtr {
+    pub ptr: *const Object,
+}
+
+impl ObjectPtr {
+    pub fn new(ptr: *const Object) -> Self {
+        ObjectPtr { ptr }
+    }
+
+    pub fn object_ref(&self) -> &Object {
+        unsafe { self.ptr.as_ref().expect("Null pointer") }
+    }
+}
+
+impl Display for ObjectPtr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let o = self.object_ref();
+        f.write_str(&o.to_string())
+    }
+}
+
 #[derive(Debug, Clone, Eq)]
 pub struct SharedString(pub Rc<String>);
 
 impl SharedString {
+    #[allow(clippy::should_implement_trait)]
     pub fn from_str(s: &str) -> Self {
         SharedString::from_string(s.into())
     }
@@ -69,9 +132,9 @@ pub enum Object {
     SharedString(SharedString),
     Function(Rc<Function>),
     Class(Rc<Class>),
-    Instance(Instance),
-    Closure(Closure),
-    Receiver(Rc<Value>, Rc<Closure>),
+    Instance(Rc<Instance>),
+    Closure(Rc<Closure>),
+    Receiver(Rc<StackValue>, Rc<Closure>),
 }
 
 #[derive(Debug, Clone)]
@@ -98,7 +161,7 @@ impl Display for Class {
 #[derive(Debug, Clone)]
 pub struct Instance {
     pub class: Rc<Class>,
-    pub fields: Shared<HashMap<SharedString, Value>>,
+    pub fields: Shared<HashMap<SharedString, StackValue>>,
 }
 
 impl Instance {
@@ -146,7 +209,7 @@ pub struct Upvalue {
 #[derive(Debug, Clone)]
 pub enum Location {
     Stack(usize),
-    Heap(Value),
+    Heap(StackValue),
 }
 
 impl Upvalue {
@@ -205,7 +268,7 @@ impl Display for Function {
     }
 }
 
-pub type NativeFn = Rc<dyn Fn(Vec<Value>) -> Value>;
+pub type NativeFn = Rc<dyn Fn(Vec<StackValue>) -> StackValue>;
 
 #[derive(Clone)]
 pub struct NativeFunction {
@@ -231,7 +294,7 @@ impl NativeFunction {
         }
     }
 
-    pub fn call(&self, arguments: Vec<Value>) -> Value {
+    pub fn call(&self, arguments: Vec<StackValue>) -> StackValue {
         let function = self.function.clone();
         function(arguments)
     }
@@ -256,9 +319,9 @@ impl UserDefinedFunction {
     }
 }
 
-// pub type Strings = Objects<String, SharedString>;
+pub type Strings = Objects<String, SharedString>;
 
-pub type Values = Objects<SharedString, Value>;
+pub type Values = Objects<SharedString, StackValue>;
 
 #[allow(dead_code)]
 #[derive(Debug)]
@@ -271,6 +334,7 @@ where
 
 #[allow(dead_code)]
 impl<K: std::hash::Hash + std::cmp::Eq, V> Objects<K, V> {
+    #[allow(clippy::new_without_default)]
     pub fn new() -> Self {
         Objects {
             objects: HashMap::new(),
@@ -291,5 +355,122 @@ impl<K: std::hash::Hash + std::cmp::Eq, V> Objects<K, V> {
 
     pub fn remove(&mut self, key: &K) {
         self.objects.remove(key);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{f64::EPSILON, ptr::NonNull, time::Instant};
+
+    use super::SharedString;
+
+    // use super::{Object, SharedString, Value};
+
+    #[derive(Debug, Clone)]
+    pub enum Value {
+        Unitialized,
+        Bool(bool),
+        Nil,
+        Number(f64),
+        // Object(ObjectPtr),
+        Object(Object),
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    pub struct ObjectPtr {
+        ptr: NonNull<Object>,
+    }
+
+    impl ObjectPtr {
+        // pub fn new(ptr: *mut Object) -> Self {
+        // let ptr = NonNull::new(ptr).expect("Null pointer");
+        // ObjectPtr { ptr }
+        // }
+    }
+
+    #[derive(Debug, Clone)]
+    pub enum Object {
+        SharedString(SharedString),
+    }
+    impl Default for Value {
+        fn default() -> Self {
+            Value::Unitialized
+        }
+    }
+
+    #[test]
+    fn primitives_read_write() {
+        let constants = vec![
+            Value::Nil,
+            Value::Number(1.0),
+            Value::Bool(true),
+            Value::Bool(false),
+            // Value::Object(ObjectPtr::new(&mut str as *mut Object)),
+            // Value::Object(ObjectPtr::new(&mut stru as *mut Object)),
+            Value::Object(Object::SharedString(SharedString::from_str("str"))),
+            Value::Object(Object::SharedString(SharedString::from_str("stru"))),
+        ];
+        println!("{}", std::mem::size_of::<Value>());
+
+        let mut stack = [
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+            Value::Nil,
+        ];
+
+        let start = Instant::now();
+        let mut count = 0;
+        let operations = 10000000;
+        while count < operations {
+            for i in 0..constants.len() {
+                for j in 0..constants.len() {
+                    let a = constants[i].clone();
+                    let b = constants[j].clone();
+                    // let a = constants[i];
+                    // let b = constants[j];
+                    stack[0] = a;
+                    stack[1] = b;
+                    let a = std::mem::take(&mut stack[0]);
+                    let b = std::mem::take(&mut stack[1]);
+                    stack[0] = Value::Bool(value_equals(a, b));
+                    count += 1;
+                }
+            }
+        }
+        println!(
+            "Time for {} operations ={} ms",
+            operations,
+            start.elapsed().as_millis()
+        )
+    }
+    fn value_equals(l: Value, r: Value) -> bool {
+        match (l, r) {
+            (Value::Bool(l), Value::Bool(r)) => l == r,
+            (Value::Nil, Value::Nil) => true,
+            (Value::Number(l), Value::Number(r)) => num_equals(l, r),
+            (Value::Object(Object::SharedString(l)), Value::Object(Object::SharedString(r))) => {
+                l == r
+            }
+            // (Value::Object(l), Value::Object(r)) => {
+            //     let l: &Object = unsafe { l.ptr.as_ref() };
+            //     let r: &Object = unsafe { r.ptr.as_ref() };
+            //     match (l, r) {
+            //         (Object::String(l), Object::String(r)) => l == r,
+            //     }
+            // }
+            _ => false,
+        }
+    }
+    fn num_equals(l: f64, r: f64) -> bool {
+        (l - r).abs() < EPSILON
     }
 }

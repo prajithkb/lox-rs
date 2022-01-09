@@ -4,7 +4,7 @@ use num_enum::{IntoPrimitive, TryFromPrimitive};
 
 use super::{
     chunk::Chunk,
-    objects::{Byte, Function, Object, Value},
+    objects::{Byte, Function, Object, StackValue, Value},
 };
 
 #[derive(Debug, PartialEq, Clone, Copy, IntoPrimitive, TryFromPrimitive)]
@@ -110,6 +110,9 @@ fn as_u16(i: Byte) -> u16 {
 }
 
 pub fn print_value(value: &Value, writer: &mut dyn Write) {
+    write!(writer, "{}", value).expect("Write failed");
+}
+pub fn print_stack_value(value: &StackValue, writer: &mut dyn Write) {
     write!(writer, "{}", value).expect("Write failed");
 }
 
